@@ -7,6 +7,7 @@ from __future__ import annotations
 import html
 
 from .model import CATEGORIES, CATEGORY_TITLE, ERROR, INFO, PASS, SEVERITIES, SEVERITY_MEANING, UNKNOWN, WARN
+from .report import IMAGE_TEXT
 from .theme import DARK_THEME, HEADLINE, STATUS_PLURAL, STATUS_TEXT, Theme
 
 OVERVIEW = "overview"
@@ -81,8 +82,8 @@ def header_text(report):
     if not report:
         return "No scan yet", ""
     h, t = report["host"], report["totals"]
-    host = " · ".join(x for x in (f"{h.get('name', '')} {h.get('version', '')}".strip(),
-                                  h.get("edition", ""), f"kernel {h.get('kernel', '')}") if x)
+    host = " · ".join(x for x in (h.get("name", ""), IMAGE_TEXT.get(h.get("image", ""), ""),
+                                  f"kernel {h.get('kernel', '')}") if x)
     counts = " · ".join(f"{t[s]} {STATUS_PLURAL[s]}" for s in (ERROR, WARN, UNKNOWN, INFO, PASS))
     return host, counts
 
@@ -164,9 +165,9 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME):
         lead = ("Scanning… results appear when every check has finished." if scanning
                 else "Press <b>Scan</b> (F5) to run the checks.")
         return (f'<h2 style="color:{t.text};font-weight:600">Check this system\'s health</h2>'
-                f'<p style="color:{t.muted}">Doctor inspects bootc deployments, updates, services, drivers, '
-                f'controllers, storage, network and logs. It is read-only: it needs no root, changes nothing '
-                f'and sends nothing anywhere.</p>'
+                f'<p style="color:{t.muted}">Doctor checks updates and packages, security, services, drivers, '
+                f'controllers, storage, apps, network and logs on any Linux. It is read-only: it needs no '
+                f'root, changes nothing and sends nothing anywhere.</p>'
                 f'<p style="color:{t.text}">{lead}</p>' + _legend(t))
     tot = report["totals"]
     state = report["overall"]
@@ -181,12 +182,21 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME):
         WARN, f'<span style="color:{t.status[WARN].fg};font-weight:600">Scan incomplete</span><br>'
               f'It was cancelled or timed out. Checks that did not finish are shown as Unknown.', t)
     counts = " · ".join(f"{tot[s]} {STATUS_PLURAL[s]}" for s in (ERROR, WARN, UNKNOWN, INFO, PASS))
+    skipped = report.get("not_applicable") or []
+    not_here = ""
+    if skipped:
+        not_here = (_section("Not applicable here", t)
+                    + f'<p style="color:{t.muted};margin-top:0">These checks only run on other kinds of Linux:</p>'
+                    + '<table cellspacing="0">' + "".join(
+                        f'<tr><td style="color:{t.text};padding:2px 16px 2px 0">{_e(item["title"])}</td>'
+                        f'<td style="color:{t.muted};padding:2px 0">only on {_e(item["applies_to"])}</td></tr>'
+                        for item in skipped) + "</table>")
     return (_section("Overview", t).replace("margin-top:16px", "margin-top:0")
             + f'<h2 style="color:{t.status[state].fg};margin-top:0;font-weight:600">{_e(HEADLINE[state])}</h2>'
             f'<p style="color:{t.muted}">{counts}<br>A point-in-time observation, not a score.</p>'
             + incomplete + _section("Groups", t) + '<table cellspacing="0">' + "".join(rows) + "</table>"
             + f'<p style="color:{t.muted};margin-top:12px">Select a check to see its evidence and what you can do.</p>'
-            + _legend(t))
+            + not_here + _legend(t))
 
 
 def _legend(theme: Theme = DARK_THEME):

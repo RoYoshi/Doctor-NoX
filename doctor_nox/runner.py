@@ -27,30 +27,24 @@ Token = Union[str, "re.Pattern[str]", frozenset]
 # ── fixed vocabularies ───────────────────────────────────────────────────────
 #: The only systemd units Doctor may name in a command.
 UNITS = frozenset({
-    "fe-xicoos-auto-update.timer", "fe-xicoos-auto-update.service",
-    "fe-xicoos-auto-update-migrate.service", "bootc-fetch-apply-updates.timer",
-    "bootc-fetch-apply-updates.service", "fe-xicoos-flatpaks.service",
-    "fe-xicoos-flatpaks.timer", "fe-xicoos-updater-config-migrate.service",
-    "fe-xicoos-update-notifier.timer", "fe-xicoos-update-notifier.service",
-    "fe-xicoos-status.service", "fe-xicoos-check.service", "fe-xicoos-upgrade.service",
-    "fe-xicoos-rollback.service", "NetworkManager.service", "systemd-resolved.service",
+    # automatic-update timers, read with `is-enabled` only
+    "rpm-ostreed-automatic.timer", "bootc-fetch-apply-updates.timer", "uupd.timer", "ublue-update.timer",
+    "fe-xicoos-auto-update.timer", "dnf-automatic.timer", "dnf5-automatic.timer", "dnf-automatic-install.timer",
+    "apt-daily-upgrade.timer", "transactional-update.timer",
+    # services whose state other checks read with `show`
+    "NetworkManager.service", "systemd-resolved.service", "firewalld.service",
 })
-JOURNAL_UNITS = frozenset(f"--unit={u}" for u in UNITS if u.endswith(".service"))
 #: Packages Doctor may query with rpm -q (read-only rpmdb query).
-PACKAGES = frozenset({
-    "kernel-core", "kernel-modules", "kernel-modules-extra", "foot", "foot-terminfo",
-    "konsole", "konsole-part", "dolphin", "steam", "python3-pyside6", "flatpak",
-    "akmod-nvidia", "xorg-x11-drv-nvidia", "xorg-x11-drv-nvidia-libs", "mesa-vulkan-drivers",
-    "kmod-nvidia", "bootc", "pipewire",
-})
+PACKAGES = frozenset({"rpm", "kernel-modules-extra"})
 KREL = re.compile(r"[0-9][0-9A-Za-z._+~-]{0,80}")
-#: rpm -q also accepts a package name pinned to the running kernel release.
-KERNEL_NVR = re.compile(r"kernel-(?:core|modules|modules-extra)-[0-9][0-9A-Za-z._+~-]{0,80}")
-MODULES = frozenset({"xpad", "nvidia", "nvidia_drm", "nouveau", "hid_xpadneo", "uinput"})
-MODINFO_FIELDS = frozenset({"filename", "license", "version"})
+#: rpm -q also accepts kernel-modules-extra pinned to the running kernel release.
+KERNEL_NVR = re.compile(r"kernel-modules-extra-[0-9][0-9A-Za-z._+~-]{0,80}")
+MODULES = frozenset({"xpad", "nvidia"})
+MODINFO_FIELDS = frozenset({"filename", "license"})
 SHOW_PROPS = "--property=LoadState,ActiveState,SubState,Result,UnitFileState,ExecMainStatus"
 FAILED = ("list-units", "--state=failed", "--all", "--no-legend", "--plain", "--no-pager", "--full")
 RPM_QF = "--queryformat=%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\\n"
+RPM_INSTALLTIME = "--queryformat=%{INSTALLTIME}\\n"
 
 
 @dataclass(frozen=True)
@@ -65,25 +59,27 @@ class CommandSpec:
 ALLOWED: dict[str, CommandSpec] = {
     "bootc": CommandSpec(("/usr/bin/bootc",), (("status", "--json", "--format-version=1"),),
                          timeout=20.0),
+    "rpm-ostree": CommandSpec(("/usr/bin/rpm-ostree",), (("status", "--json"),), timeout=20.0,
+                              max_stdout=2 * 1024 * 1024),
     "systemctl": CommandSpec(("/usr/bin/systemctl",), (
         FAILED,
         ("--user", *FAILED),
         ("is-system-running",),
         ("is-enabled", UNITS),
-        ("--user", "is-enabled", UNITS),
         ("show", UNITS, "--no-pager", SHOW_PROPS),
-        ("--user", "show", UNITS, "--no-pager", SHOW_PROPS),
     )),
     "getenforce": CommandSpec(("/usr/sbin/getenforce", "/usr/bin/getenforce"), ((),), timeout=5.0),
     "journalctl": CommandSpec(("/usr/bin/journalctl",), (
         # no --quiet: it would hide journalctl's "not seeing system messages" access hint
         ("--boot=0", "--priority=0..3", "--no-pager", "--output=json", "--lines=400"),
-        ("--boot=0", JOURNAL_UNITS, "--priority=0..4", "--no-pager", "--output=json", "--lines=40"),
     ), timeout=12.0, max_stdout=2 * 1024 * 1024),
     "flatpak": CommandSpec(("/usr/bin/flatpak",), (
         ("list", "--system", "--app", "--columns=application"),
         ("list", "--user", "--app", "--columns=application"),
+        ("remotes", "--system", "--columns=name"),
+        ("remotes", "--user", "--columns=name"),
     ), timeout=20.0),
+    "snap": CommandSpec(("/usr/bin/snap",), (("list",),), timeout=15.0),
     "lspci": CommandSpec(("/usr/bin/lspci", "/usr/sbin/lspci"), (("-nnk",),), timeout=10.0),
     "nvidia-smi": CommandSpec(("/usr/bin/nvidia-smi",), (
         ("--query-gpu=name,driver_version", "--format=csv,noheader"),), timeout=10.0),
@@ -92,10 +88,12 @@ ALLOWED: dict[str, CommandSpec] = {
     "rpm": CommandSpec(("/usr/bin/rpm",), (
         ("-q", RPM_QF, PACKAGES),
         ("-q", RPM_QF, KERNEL_NVR),
-    ), timeout=10.0),
+        ("-qa", RPM_INSTALLTIME),
+    ), timeout=15.0),
+    "dpkg": CommandSpec(("/usr/bin/dpkg",), (("--audit",),), timeout=20.0),
+    "pacman": CommandSpec(("/usr/bin/pacman",), (("-Q", "pacman"), ("-Qdtq",)), timeout=20.0),
     "nmcli": CommandSpec(("/usr/bin/nmcli",), (
         ("-t", "-f", "STATE,CONNECTIVITY", "general"),
-        ("-t", "-f", "DEVICE,TYPE,STATE", "device"),
     ), timeout=6.0),
 }
 
@@ -107,7 +105,9 @@ FORBIDDEN_VERBS = frozenset({
     "reset-failed", "kill", "set-property", "isolate", "--rotate", "--vacuum-size",
     "--vacuum-time", "--flush", "--sync", "repair", "remote-add", "remote-modify",
     "remote-delete", "usr-overlay", "--erase", "-e", "-i", "-U", "--install", "--upgrade",
-    "insmod", "rmmod", "modprobe", "--apply", "--now", "set-hours",
+    "insmod", "rmmod", "modprobe", "--apply", "--now", "set-hours", "-S", "-Syu", "-R", "-Rns", "-U",
+    "--configure", "--purge", "-r", "-P", "refresh", "revert", "dup", "up", "patch", "usroverlay",
+    "rebase", "deploy", "kargs", "initramfs", "cleanup", "reset", "apply-live", "override",
 })
 
 
@@ -219,21 +219,24 @@ class Runner:
         exe, why = self._resolve(spec.paths)
         if exe is None:
             return self._record(CmdResult(argv_display, why, None, "", ""))
+        # Run the verified file, but keep the name it was found under as argv[0]:
+        # multi-call tools (modinfo → kmod) choose what to do from that name.
+        argv0 = next((c for c in spec.paths if os.path.realpath(c) == exe), exe)
         with self._slots:
             if self.cancel.is_set():  # may have waited for a slot while the scan was cancelled
                 return self._record(CmdResult(argv_display, "cancelled", None, "", ""))
-            return self._record(self._execute((exe, *args), argv_display, spec,
-                                              min(timeout or spec.timeout, spec.timeout)))
+            return self._record(self._execute((argv0, *args), argv_display, spec,
+                                              min(timeout or spec.timeout, spec.timeout), exe))
 
     def _record(self, result: CmdResult) -> CmdResult:
         with self._log_lock:
             self.log.append(result)
         return result
 
-    def _execute(self, argv, display, spec: CommandSpec, timeout: float) -> CmdResult:
+    def _execute(self, argv, display, spec: CommandSpec, timeout: float, executable: str) -> CmdResult:
         start = time.monotonic()
         try:
-            proc = subprocess.Popen(argv, shell=False, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(argv, executable=executable, shell=False, stdin=subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     env=_safe_env(), close_fds=True, start_new_session=True,
                                     cwd="/")

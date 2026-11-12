@@ -918,11 +918,12 @@ class Window(QMainWindow):
             qt = "PySide6"
         t = self.theme
         text = (f"<h3 style='margin-bottom:4px'>Doctor NoX {VERSION}</h3>"
-                f"<p>Read-only system health diagnostics for FE-XicoOS.</p>"
+                f"<p>Read-only system health checks for Linux: Fedora (including Atomic and bootc), "
+                f"Debian and Ubuntu, Arch and openSUSE, with general checks everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. "
                 f"Reports are written only where you choose.</p>"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION} · {qt} · "
-                f"Python {sys.version.split()[0]}<br>License: Apache-2.0 · part of FE-XicoOS</p>")
+                f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
 
 
@@ -978,35 +979,43 @@ def _demo_report():
     from .model import Finding, build_report
     F = Finding
     findings = [
-        F("system.bootc.booted", "system", "Booted deployment", "pass", "Booted image matches the staged digest",
-          evidence=["bootc status --json: booted ghcr.io/example/fe-xicoos:latest", "digest sha256:3f9c…a71e"]),
-        F("system.bootc.rollback", "system", "Rollback deployment", "info", "A rollback deployment is available"),
-        F("updates.legacy_timer", "updates", "Legacy auto-reboot timer", "error",
-          "The legacy bootc auto-update timer is enabled",
-          evidence=["systemctl is-enabled bootc-fetch-apply-updates.timer: enabled"],
-          reason="This timer can stage an update and reboot without asking, bypassing FE-Xico Updater.",
-          guidance=["Open FE-Xico Updater and choose your update mode again; it disables the legacy timer.",
-                    "Or run: systemctl disable --now bootc-fetch-apply-updates.timer"]),
-        F("updates.mode", "updates", "Update mode", "info", "Manual: FE-Xico Updater asks before applying"),
-        F("security.selinux", "security", "SELinux", "pass", "Enforcing, targeted policy"),
-        F("security.failed_units", "security", "Failed system services", "warn", "1 service failed during this boot",
-          evidence=["systemctl --failed: example-sync.service  loaded failed failed"],
-          guidance=["Inspect it with: journalctl -b -u example-sync.service"]),
-        F("hardware.gpu", "hardware", "Graphics driver", "pass", "NVIDIA open kernel module loaded"),
+        F("system.identity", "system", "Operating system", "info", "Debian GNU/Linux 13 (trixie) · kernel 6.12.48+deb13-amd64",
+          evidence=["ID=debian", "family: Debian / Ubuntu family", "package tools: apt, dpkg, flatpak"]),
+        F("updates.reboot", "updates", "Pending restart", "info", "Restart needed: apt/dpkg asked for a restart today",
+          evidence=["/run/reboot-required: present (since today)", "packages asking for it: linux-image-amd64"],
+          guidance=["Restart when convenient so the update takes full effect. Doctor never restarts."]),
+        F("updates.packages", "updates", "Package database", "pass", "No broken or half-installed packages"),
+        F("updates.config_files", "updates", "Config files to review", "info",
+          "2 config file(s) left by package updates to review",
+          evidence=["/etc/ssh/sshd_config.dpkg-dist", "/etc/default/grub.ucf-dist"]),
+        F("updates.last_update", "updates", "Last update", "pass", "Packages last changed 2 days ago"),
+        F("security.mac", "security", "SELinux / AppArmor", "pass", "AppArmor is enabled"),
+        F("security.firewall", "security", "Firewall", "info", "No firewalld or ufw firewall is on"),
+        F("security.failed_units", "security", "Failed services", "warn", "1 failed unit(s): example-sync.service",
+          evidence=["system: example-sync.service  — Example sync daemon"],
+          guidance=["Inspect: `systemctl status example-sync.service` and "
+                    "`journalctl -b -u example-sync.service`."]),
+        F("hardware.graphics", "hardware", "Graphics", "pass", "AMD: amdgpu driver"),
         F("hardware.controllers", "hardware", "Game controllers", "warn",
-          "Controller connected but the xpad driver is not loaded"),
-        F("storage.root_free", "storage", "Free space on /", "pass", "182 GiB free (61 %)"),
-        F("storage.var_free", "storage", "Free space on /var", "pass", "96 GiB free (48 %)"),
-        F("software.flatpak_remotes", "software", "Flatpak remotes", "pass", "Flathub is configured"),
-        F("software.flatpak_updates", "software", "Flatpak updates", "info", "3 app updates are available"),
-        F("network.link", "network", "Network links", "pass", "1 wired link is up"),
-        F("logs.boot", "logs", "Current boot errors", "unknown", "The journal could not be read",
-          reason="Reading other users' journal entries needs the systemd-journal group."),
+          "Xbox-protocol controller connected but not bound to a driver"),
+        F("storage.space", "storage", "Free space", "error", "Low free space: /boot",
+          evidence=["/boot (kernels; ext4): 61 MiB free of 943 MiB (6%) — ERROR",
+                    "/ + /var + /home (system, your home; ext4): 182.4 GiB free of 465.2 GiB (39%) — PASS"],
+          guidance=["A full /boot stops kernel updates. Removing old kernels with your package manager frees it."]),
+        F("software.flatpak", "software", "Flatpak", "pass", "12 app(s) from 1 source(s) including Flathub"),
+        F("network.link", "network", "Network links", "pass", "Connected on enp5s0"),
+        F("logs.boot", "logs", "Current boot errors", "unknown", "Journal not readable",
+          reason="Members of the systemd-journal, adm or wheel groups can read the system journal."),
     ]
     finished = datetime.datetime.now(datetime.timezone.utc)
-    host = {"name": "FE-XicoOS", "version": "44", "edition": "NVIDIA Open", "kernel": "6.17.7-300.fc44.x86_64"}
+    host = {"name": "Debian GNU/Linux 13 (trixie)", "id": "debian", "version": "13", "family": "debian",
+            "kernel": "6.12.48+deb13-amd64", "init": "systemd", "security": "apparmor",
+            "package_managers": ["apt", "dpkg", "flatpak"]}
+    skipped = [{"id": "system.image", "category": "system", "title": "Image deployments",
+                "applies_to": "image-based OSTree systems (bootc, Fedora Atomic, Universal Blue…)"},
+               {"id": "software.snap", "category": "software", "title": "Snap", "applies_to": "systems with Snap"}]
     return build_report(findings, host, started=finished - datetime.timedelta(milliseconds=1840),
-                        finished=finished, complete=True)
+                        finished=finished, complete=True, not_applicable=skipped)
 
 
 def screenshots(out_dir: str) -> int:
@@ -1119,10 +1128,10 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
 
     def fixture_probe(ctx):
         probe_threads.append(threading.current_thread().name)
-        return [Finding("system.bootc.booted", "system", "Booted deployment", "pass", "Booted from fixture",
+        return [Finding("system.identity", "system", "Operating system", "pass", "Fixture Linux",
                         evidence=["fixture"]),
-                Finding("updates.legacy_timer", "updates", "Legacy auto-reboot timer", "error",
-                        "Legacy bootc timer is ENABLED", guidance=["fixture guidance"]),
+                Finding("updates.packages", "updates", "Package database", "error",
+                        "The package database could not be read", guidance=["fixture guidance"]),
                 Finding("hardware.controllers", "hardware", "Game controllers", "warn",
                         "Xbox-protocol controller connected", evidence=["user alice on 10.1.2.3"]),
                 Finding("network.link", "network", "Network links", "info", "Offline")]
@@ -1185,7 +1194,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     window.sev_buttons["pass"].setChecked(True)
     window.tree.setCurrentItem(window.tree.topLevelItem(0))
     app.processEvents()
-    check("Legacy auto-reboot timer" in window.details.toPlainText(), "selection shows details")
+    check("Package database" in window.details.toPlainText(), "selection shows details")
     window.nav.setCurrentRow(3)  # Security & Services: empty in the fixture
     app.processEvents()
     check(window.stack.currentWidget() is window.empty, "empty group shows the empty state")

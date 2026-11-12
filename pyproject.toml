@@ -1,0 +1,76 @@
+# Doctor NoX as a Python package: used by pip/pipx, and by the Debian and Arch
+# packages (which build a wheel and install it). The Fedora/openSUSE RPM
+# installs the same files without a wheel (packaging/doctor-nox.spec).
+#
+# hatchling because it accepts the SPDX string in `license` on every version the
+# supported distributions ship; setuptools needs a different form before and
+# after version 77.
+
+[build-system]
+requires = ["hatchling>=1.13"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doctor-nox"
+dynamic = ["version"]
+description = "Read-only system health checks for Linux, with a desktop window and a command line"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "RoYoshi" }]
+keywords = ["linux", "diagnostics", "system-health", "troubleshooting", "desktop"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Systems Administration",
+]
+# The command line needs only the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+# The desktop window. Distribution packages use the distribution's PySide6 instead.
+gui = ["PySide6>=6.5"]
+
+[project.scripts]
+doctor-nox = "doctor_nox.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/RoYoshi/Doctor-NoX"
+Documentation = "https://github.com/RoYoshi/Doctor-NoX/blob/main/docs/DOCTOR_NOX.md"
+Issues = "https://github.com/RoYoshi/Doctor-NoX/issues"
+
+[tool.hatch.version]
+path = "doctor_nox/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["doctor_nox"]
+
+# Installed under <prefix>/share: /usr/share for the Debian and Arch packages,
+# ~/.local/share for `pip install --user`, the virtual environment for pipx.
+[tool.hatch.build.targets.wheel.shared-data]
+"data/io.github.royoshi.doctornox.desktop" = "share/applications/io.github.royoshi.doctornox.desktop"
+"data/io.github.royoshi.doctornox.metainfo.xml" = "share/metainfo/io.github.royoshi.doctornox.metainfo.xml"
+"data/doctor-nox-report.schema.json" = "share/doctor-nox/doctor-nox-report.schema.json"
+"data/icons/hicolor" = "share/icons/hicolor"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/doctor_nox",
+    "/bin",
+    "/data",
+    "/docs",
+    "/packaging",
+    "/tests",
+    "/tools",
+    "/LICENSE",
+    "/README.md",
+    "/VERSION",
+    "/pyproject.toml",
+]

@@ -1,37 +1,34 @@
-"""FE-Xico Updater, automatic update policy and recent update results.
+"""Updates and packages: pending reboot, package database health, leftover config
+files, when the system was last updated, and whether automatic updates are on.
 
-Doctor reads state only. It never starts the updater's services, never
-touches its transaction lock, never changes timers or active hours.
+Doctor reads state only: no package manager is asked to refresh, download,
+install or repair anything, and nothing contacts a mirror.
 """
 from __future__ import annotations
 
-import configparser
 import datetime
 import os
-import stat
+import re
 
+from ..distro import KNOWN_FAMILY, Scope
 from ..model import ERROR, INFO, PASS, UNKNOWN, WARN
 from . import finding, probe
 
 CAT = "updates"
-SAFE_TIMER = "fe-xicoos-auto-update.timer"
-LEGACY_TIMER = "bootc-fetch-apply-updates.timer"
-MIGRATE = "fe-xicoos-auto-update-migrate.service"
-SETTINGS = "/var/lib/fe-xicoos-auto-updates/settings.json"
-EVENT = "/var/lib/fe-xicoos-auto-updates/event.json"
-RUNTIME = "/run/fe-xicoos-updater"
-BUILD_MARKER = "/usr/share/fe-xicoos/updater-build-status"
-HELPER = "/usr/libexec/fe-xicoos-updater-helper"
-#: Same search order as FE-Xico Updater's findConfigFile() (src/components/kConfig/k_config.cpp).
-CONFIG_BASES = ("/etc", "/usr/local/etc", "/usr/etc", "/etc/xdg", "/usr/etc/xdg", "/usr/local/etc/xdg")
-CONFIG_REL = "fe-xico-updater/config.ini"
-EXPECTED_COMMANDS = {
-    "systemUpdateCommand": f"{HELPER} fe-xicoos-upgrade.service",
-    "systemRollbackCommand": f"{HELPER} fe-xicoos-rollback.service",
-    "systemCheckCommand": f"{HELPER} fe-xicoos-check.service",
-    "systemStatusCommand": f"{HELPER} fe-xicoos-status.service",
-}
-DEFAULT_HOURS = (9, 23)  # fe-xicoos-auto-update-worker default when settings.json is absent
+DAY = 86400
+STALE_REBOOT_DAYS = 7
+STALE_UPDATE_DAYS = 30
+
+ENABLED = ("enabled", "enabled-runtime", "static", "indirect", "alias", "linked", "linked-runtime")
+#: Programs that hold pacman's database lock themselves (libalpm), by process name.
+ALPM_HOLDERS = frozenset({"pacman", "pamac-daemon", "packagekitd", "octphelper"})
+
+RESTARTABLE = Scope("package-based and transactional-update systems",
+                    lambda p: p.image in ("", "transactional"))
+PACKAGE_FAMILIES = Scope("package-based Fedora, Debian/Ubuntu, Arch and openSUSE systems",
+                         lambda p: not p.image_based and p.family in ("fedora", "debian", "arch", "suse"))
+AUTO_UPDATES = Scope("Fedora (including Atomic), Debian/Ubuntu, Arch and openSUSE families (not SteamOS)",
+                     lambda p: p.image != "steamos" and (p.family in ("fedora", "debian", "arch", "suse") or p.ostree))
 
 
 def unit_file_state(ctx, unit, user=False):
@@ -57,283 +54,419 @@ def unit_show(ctx, unit, user=False):
     return dict(line.split("=", 1) for line in res.stdout.splitlines() if "=" in line), res
 
 
-ENABLED = ("enabled", "enabled-runtime", "static", "indirect", "alias", "linked", "linked-runtime")
-OFF = ("disabled", "masked", "masked-runtime")
+def _days(ctx, when: datetime.datetime | None) -> float | None:
+    if when is None:
+        return None
+    return max(0.0, (ctx.now - when).total_seconds() / DAY)
 
 
-@probe("updates.timers", CAT, "Automatic update timers")
-def timers(ctx):
-    out = []
-    safe, res_safe = unit_file_state(ctx, SAFE_TIMER)
-    ev = [f"{SAFE_TIMER}: {safe or 'unknown'}", res_safe.describe()]
-    if not safe:
-        out.append(finding("updates.auto_timer", CAT, "Automatic checks", UNKNOWN,
-                           "Could not read the automatic-update timer", reason=res_safe.describe(), evidence=ev))
-    elif safe in ENABLED:
-        out.append(finding("updates.auto_timer", CAT, "Automatic checks", PASS,
-                           "Automatic checks on: hourly outside active hours, never reboots", evidence=ev))
-    elif safe in OFF:
-        out.append(finding("updates.auto_timer", CAT, "Automatic checks", INFO,
-                           "Manual-update mode (automatic checks are off)", evidence=ev,
-                           guidance=["This is a choice, not a fault. Turn automatic checks on in "
-                                     "FE-Xico Updater → Settings if you want them."]))
-    elif safe == "not-found":
-        out.append(finding("updates.auto_timer", CAT, "Automatic checks", WARN,
-                           f"{SAFE_TIMER} is not installed in this image", evidence=ev,
-                           guidance=["The image may predate safe automatic updates, or the build dropped "
-                                     "the unit. Rebuild/update the image."]))
-    else:
-        out.append(finding("updates.auto_timer", CAT, "Automatic checks", UNKNOWN,
-                           f"Unrecognized timer state: {safe}", evidence=ev,
-                           reason="systemctl reported a state Doctor does not classify."))
-
-    legacy, res_legacy = unit_file_state(ctx, LEGACY_TIMER)
-    ev = [f"{LEGACY_TIMER}: {legacy or 'unknown'}", res_legacy.describe()]
-    guidance_legacy = ["The legacy bootc timer applies updates AND reboots unattended. FE-XicoOS masks it "
-                       "at every boot via " + MIGRATE + ".",
-                       f"To inspect: `systemctl status {MIGRATE}` and `journalctl -b -u {MIGRATE}`.",
-                       "Re-enabling automatic checks in FE-Xico Updater masks it again."]
-    if not legacy:
-        out.append(finding("updates.legacy_timer", CAT, "Legacy auto-reboot timer", UNKNOWN,
-                           "Could not read the legacy bootc timer", reason=res_legacy.describe(), evidence=ev))
-    elif legacy in ("masked", "masked-runtime", "not-found"):
-        out.append(finding("updates.legacy_timer", CAT, "Legacy auto-reboot timer", PASS,
-                           "Legacy bootc auto-reboot timer is masked" if legacy != "not-found"
-                           else "Legacy bootc auto-reboot timer is not present", evidence=ev))
-    elif legacy in ENABLED:
-        out.append(finding("updates.legacy_timer", CAT, "Legacy auto-reboot timer", ERROR,
-                           "Legacy bootc timer is ENABLED and can reboot this PC unattended",
-                           evidence=ev, guidance=guidance_legacy))
-    else:  # disabled but not masked: inactive now, but the boot-time migration did not mask it
-        out.append(finding("updates.legacy_timer", CAT, "Legacy auto-reboot timer", WARN,
-                           f"Legacy bootc timer is {legacy}, not masked", evidence=ev,
-                           guidance=guidance_legacy))
-
-    props, res_mig = unit_show(ctx, MIGRATE)
-    ev = [f"{MIGRATE}: " + ", ".join(f"{k}={props[k]}" for k in ("LoadState", "ActiveState", "Result",
-                                                                   "ExecMainStatus") if k in props)
-          if props else res_mig.describe()]
-    if not props:
-        out.append(finding("updates.migration", CAT, "Update-policy migration", UNKNOWN,
-                           "Could not read the migration service", reason=res_mig.describe(), evidence=ev))
-    elif props.get("LoadState") == "not-found":
-        out.append(finding("updates.migration", CAT, "Update-policy migration", INFO,
-                           "Migration service not present in this image", evidence=ev))
-    elif props.get("Result") not in (None, "", "success") or props.get("ActiveState") == "failed":
-        out.append(finding("updates.migration", CAT, "Update-policy migration", WARN,
-                           "The boot-time update-policy migration failed", evidence=ev,
-                           guidance=[f"`journalctl -b -u {MIGRATE}` shows why."]))
-    else:
-        out.append(finding("updates.migration", CAT, "Update-policy migration", PASS,
-                           "Boot-time update-policy migration completed", evidence=ev))
-    return out
+def _ago(days: float | None) -> str:
+    if days is None:
+        return "at an unknown time"
+    if days < 1:
+        return "today"
+    return f"{days:.0f} day{'s' if round(days) != 1 else ''} ago"
 
 
-def _is_active_hour(hour, start, end):
-    if start == end:
-        return True
-    return start <= hour < end if start < end else hour >= start or hour < end
+# ── pending reboot ───────────────────────────────────────────────────────────
+MODULE_TREES = ("/usr/lib/modules", "/lib/modules")  # /lib/modules: distributions without merged /usr
 
 
-@probe("updates.active_hours", CAT, "Active hours")
-def active_hours(ctx):
-    data, why = ctx.json_file(SETTINGS, limit=4096)
-    local_hour = ctx.now.astimezone().hour
-    if why == "missing":
-        start, end = DEFAULT_HOURS
-        source = f"{SETTINGS} absent → worker default"
-    elif data is None:
-        return finding("updates.active_hours", CAT, "Active hours", WARN,
-                       "Active-hours settings are not usable", reason=f"{SETTINGS}: {why}",
-                       evidence=[f"{SETTINGS}: {why}"],
-                       guidance=["The automatic-update worker refuses unsafe or malformed settings and "
-                                 "records an error. Set active hours again in FE-Xico Updater."])
-    else:
-        start, end = (data.get("active_start"), data.get("active_end")) if isinstance(data, dict) else (None, None)
-        if type(start) is not int or type(end) is not int or not (0 <= start <= 23 and 0 <= end <= 23):
-            return finding("updates.active_hours", CAT, "Active hours", WARN,
-                           "Active-hours settings are invalid", evidence=[f"{SETTINGS}: {data!r}"[:300]],
-                           guidance=["Expected whole hours 0-23. Set them again in FE-Xico Updater."])
-        source = SETTINGS
-    inside = _is_active_hour(local_hour, start, end)
-    span = "all day (no automatic checks)" if start == end else f"{start:02d}:00–{end:02d}:00"
-    return finding("updates.active_hours", CAT, "Active hours", PASS,
-                   f"Protected {span}; now {'inside' if inside else 'outside'} active hours",
-                   evidence=[f"source: {source}", f"active_start={start} active_end={end}",
-                             f"local hour now: {local_hour:02d}"],
-                   guidance=["Automatic checks and staging only run outside active hours."])
+def kernel_key(release: str):
+    """Natural sort key for kernel releases (6.8.0-49-generic > 6.8.0-47-generic)."""
+    return [(0, int(part)) if part.isdigit() else (1, part) for part in re.findall(r"\d+|[^\d]+", release)]
 
 
-def _age(created, now):
-    try:
-        then = datetime.datetime.fromtimestamp(int(created), datetime.timezone.utc)
-    except (TypeError, ValueError, OverflowError, OSError):
-        return "unknown time"
-    hours = (now - then).total_seconds() / 3600
-    when = then.astimezone().strftime("%Y-%m-%d %H:%M")
-    return f"{when} ({hours:.0f} h ago)" if hours < 48 else f"{when} ({hours / 24:.0f} days ago)"
+def kernel_flavour(release: str, family: str) -> str:
+    """The build flavour, so only like kernels are compared.
 
-
-@probe("updates.results", CAT, "Recent update results")
-def results(ctx):
-    out = []
-    event, why = ctx.json_file(EVENT, limit=8192)
-    if why == "missing":
-        out.append(finding("updates.auto_result", CAT, "Last automatic run", INFO,
-                           "No automatic update result recorded yet", evidence=[f"{EVENT}: absent"]))
-    elif not isinstance(event, dict):
-        out.append(finding("updates.auto_result", CAT, "Last automatic run", UNKNOWN,
-                           "Automatic update result is unreadable", reason=f"{EVENT}: {why}"))
-    else:
-        kind, msg = str(event.get("kind", "")), str(event.get("message", ""))[:280]
-        ev = [f"kind={kind}", f"title={str(event.get('title', ''))[:120]}", f"message={msg}",
-              f"recorded {_age(event.get('created'), ctx.now)}"]
-        sev, summary = {
-            "none": (PASS, "Last automatic check found no update"),
-            "found": (INFO, "Last automatic check found an update"),
-            "ready": (INFO, "An automatically staged update is ready; restart when convenient"),
-            "error": (WARN, "The last automatic update run failed"),
-        }.get(kind, (UNKNOWN, f"Unrecognized result kind {kind!r}"))
-        out.append(finding("updates.auto_result", CAT, "Last automatic run", sev, summary, evidence=ev,
-                           guidance=["`journalctl -u fe-xicoos-auto-update.service` has the details."]
-                           if kind == "error" else []))
-
-    seen = []
-    failed = []
-    for action in ("status", "check", "upgrade", "rollback"):
-        path = f"{RUNTIME}/{action}.json"
-        data, why = ctx.json_file(path, limit=4 * 1024 * 1024)
-        if why == "missing":
-            continue
-        if not isinstance(data, dict):
-            seen.append(f"{action}: unreadable ({why})")
-            continue
-        mtime = ctx.mtime(path)
-        stamp = mtime.astimezone().strftime("%H:%M") if mtime else "?"
-        outcome = str(data.get("outcome", "?"))
-        seen.append(f"{action} at {stamp}: outcome={outcome}, rebootRequired={data.get('rebootRequired')}")
-        if outcome == "failed":
-            failed.append(f"{action}: {str(data.get('message', ''))[:200]}")
-    if not seen:
-        out.append(finding("updates.updater_result", CAT, "Updater operations this boot", INFO,
-                           "No FE-Xico Updater operation has run since boot",
-                           evidence=[f"{RUNTIME}: no result files"]))
-    elif failed:
-        out.append(finding("updates.updater_result", CAT, "Updater operations this boot", WARN,
-                           f"{len(failed)} updater operation(s) failed this boot", evidence=seen + failed,
-                           guidance=["`journalctl -b -u fe-xicoos-upgrade.service` (or check/status/"
-                                     "rollback) explains the failure.", "Doctor does not retry operations."]))
-    else:
-        out.append(finding("updates.updater_result", CAT, "Updater operations this boot", PASS,
-                           "Updater operations this boot completed", evidence=seen))
-    return out
-
-
-def _config_candidates(ctx):
-    """Mirror the updater: first existing, root-owned, not group/world-writable, readable file wins.
-
-    Like QFileInfo, ownership/permissions are those of the symlink target.
+    Fedora: the part after "+" (debug, 16k). Elsewhere the trailing words:
+    generic, lowlatency, amd64 vs rt-amd64, default.
     """
-    rows, chosen = [], None
-    for base in CONFIG_BASES:
-        path = f"{base}/{CONFIG_REL}"
-        p = ctx.path(path)
+    if family == "fedora":
+        return release.partition("+")[2]
+    m = re.search(r"-((?:[a-z][a-z0-9]*-)*[a-z][a-z0-9]*)$", release)
+    return m.group(1) if m else ""
+
+
+def installed_kernels(ctx) -> list[str]:
+    """Kernel releases with a module tree (one per installed kernel)."""
+    found = set()
+    for tree in MODULE_TREES:
+        found.update(d for d in ctx.listdir(tree) if ctx.exists(f"{tree}/{d}/modules.dep"))
+    return sorted(found, key=kernel_key)
+
+
+def running_modules_present(ctx) -> bool:
+    return any(ctx.exists(f"{tree}/{ctx.kernel}/modules.dep") for tree in MODULE_TREES)
+
+
+@probe("updates.reboot", CAT, "Pending restart", applies=RESTARTABLE)
+def reboot(ctx):
+    title = "Pending restart"
+    p = ctx.platform
+    ev, reasons, oldest = [f"running kernel: {ctx.kernel}"], [], None
+    for flag in ("/run/reboot-required", "/run/reboot-needed"):
+        if ctx.exists(flag):
+            days = _days(ctx, ctx.mtime(flag))
+            oldest = days if oldest is None or (days or 0) > oldest else oldest
+            who = "apt/dpkg" if flag.endswith("required") else "zypper"
+            reasons.append(f"{who} asked for a restart {_ago(days)}")
+            ev.append(f"{flag}: present (since {_ago(days)})")
+            pkgs = ctx.try_text("/run/reboot-required.pkgs", 16 * 1024) if flag.endswith("required") else None
+            if pkgs:
+                names = sorted({line.strip() for line in pkgs.splitlines() if line.strip()})
+                ev.append(f"packages asking for it: {', '.join(names[:12])}" + ("…" if len(names) > 12 else ""))
+    kernels = installed_kernels(ctx)
+    ev.append(f"kernels with modules installed: {', '.join(kernels) or 'none found'}")
+    if kernels and not running_modules_present(ctx):
+        reasons.append("the running kernel's modules were removed by an update")
+    # Arch keeps one version per kernel package (linux, linux-lts…), so a different
+    # release there is another flavour, not an update; removal above is the signal.
+    if p.family != "arch":
+        flavour = kernel_flavour(ctx.kernel, p.family)
+        newer = [k for k in kernels if kernel_flavour(k, p.family) == flavour
+                 and kernel_key(k) > kernel_key(ctx.kernel)]
+        if newer:
+            reasons.append(f"a newer kernel is installed ({newer[-1]})")
+    if not kernels and not reasons:
+        return finding("updates.reboot", CAT, title, UNKNOWN, "Installed kernels could not be listed",
+                       evidence=ev, reason="/usr/lib/modules lists no kernel with a modules.dep file.",
+                       guidance=["Normal inside a container or WSL, where the kernel comes from the host."])
+    if not reasons:
+        return finding("updates.reboot", CAT, title, PASS, "No restart needed: the newest installed kernel is running",
+                       evidence=ev)
+    gone = "the running kernel's modules were removed by an update" in reasons
+    stale = oldest is not None and oldest >= STALE_REBOOT_DAYS
+    severity = WARN if gone or stale else INFO
+    guidance = ["Restart when convenient so the update takes full effect. Doctor never restarts."]
+    if gone:
+        guidance.insert(0, "Until you restart, plugging in hardware that needs a new kernel module (USB "
+                           "devices, file systems, VPNs) can fail, because the modules for this kernel are gone.")
+    if p.family == "arch" and gone:
+        guidance.append("This is normal on Arch right after `pacman -Syu` updates the kernel.")
+    return finding("updates.reboot", CAT, title, severity, "Restart needed: " + reasons[0], evidence=ev,
+                   guidance=guidance)
+
+
+# ── package database ─────────────────────────────────────────────────────────
+def _running(ctx, names) -> str:
+    """The name of a running process from `names`, or "" (read from /proc; never signals anything)."""
+    for pid in ctx.listdir("/proc"):
+        if pid.isdigit():
+            comm = (ctx.try_text(f"/proc/{pid}/comm", 64) or "").strip()
+            if comm in names:
+                return comm
+    return ""
+
+
+def _rpmdb(ctx):
+    res = ctx.runner.run("rpm", "-q", "--queryformat=%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\\n", "rpm")
+    if res.ok:
+        return PASS, "RPM database readable", [res.describe(), f"rpm: {res.stdout.strip()[:120]}"], []
+    if res.status == "exit":
+        return ERROR, "The RPM database could not be read", [res.describe()], [
+            "Package installs and updates will fail until the database is repaired.",
+            "Ask for help before acting; `sudo rpmdb --rebuilddb` is the usual repair. Doctor changes nothing."]
+    return UNKNOWN, "rpm could not be run", [res.describe()], []
+
+
+def _dpkg(ctx):
+    ev, guidance = [], []
+    res = ctx.runner.run("dpkg", "--audit")
+    ev.append(res.describe())
+    pending = ctx.listdir("/var/lib/dpkg/updates")
+    ev.append(f"/var/lib/dpkg/updates: {len(pending)} pending record(s)")
+    if res.status not in ("ok", "exit"):
+        return UNKNOWN, "dpkg could not be run", ev, []
+    audit = [line for line in res.stdout.splitlines() if line.strip()]
+    ev += [f"  {line[:200]}" for line in audit[:12]]
+    if audit or pending:
+        guidance = ["An earlier install or upgrade did not finish. Until it does, apt refuses further changes.",
+                    "`sudo dpkg --configure -a`, then `sudo apt --fix-broken install`, usually finishes it. "
+                    "Doctor changes nothing."]
+        return WARN, "Unfinished package operations", ev, guidance
+    return PASS, "No broken or half-installed packages", ev, []
+
+
+def _pacman(ctx):
+    ev = []
+    db = ctx.runner.run("pacman", "-Q", "pacman")
+    ev.append(db.describe())
+    if db.status not in ("ok", "exit"):
+        return UNKNOWN, "pacman could not be run", ev, []
+    if not db.ok:
+        return ERROR, "The pacman database could not be read", ev, [
+            "`sudo pacman -Dk` checks the database. Doctor changes nothing."]
+    lock = ctx.exists("/var/lib/pacman/db.lck")
+    busy = _running(ctx, ALPM_HOLDERS) if lock else ""
+    ev.append(f"/var/lib/pacman/db.lck: {'present' if lock else 'absent'}" + (f" ({busy} running)" if busy else ""))
+    orphans = ctx.runner.run("pacman", "-Qdtq")
+    names = [line.strip() for line in orphans.stdout.splitlines() if line.strip()] if orphans.status in ("ok", "exit") else []
+    ev.append(f"orphaned dependencies: {len(names)}" + (f" ({', '.join(names[:8])}…)" if len(names) > 8 else
+                                                         f" ({', '.join(names)})" if names else ""))
+    if lock and not busy:
+        return WARN, "pacman's database lock is left over from an interrupted run", ev, [
+            "No pacman, pamac or PackageKit is running, so the lock is stale, and every package change "
+            "fails until it is gone. Close any package tool, then `sudo rm /var/lib/pacman/db.lck`. "
+            "Doctor changes nothing."]
+    if busy:
+        return INFO, f"A package transaction is running now ({busy})", ev, []
+    if names:
+        return INFO, f"{len(names)} orphaned package(s) no longer needed by anything", ev, [
+            "Optional cleanup: review `pacman -Qdt`, then remove what you don't want."]
+    return PASS, "pacman database readable; no stale lock", ev, []
+
+
+def _zypper(ctx):
+    level, summary, ev, guidance = _rpmdb(ctx)
+    pid = (ctx.try_text("/run/zypp.pid", 64) or "").strip()
+    alive = pid.isdigit() and ctx.exists(f"/proc/{pid}")
+    ev.append(f"/run/zypp.pid: {pid or 'empty or absent'}" + (" (running)" if alive else ""))
+    if alive and level == PASS:
+        # libzypp takes over a lock whose process is gone, so only a live holder matters.
+        return INFO, f"A package operation (process {pid}) is running now", ev, [
+            "Package tools wait or refuse until it finishes."]
+    return level, summary, ev, guidance
+
+
+@probe("updates.packages", CAT, "Package database", applies=PACKAGE_FAMILIES)
+def packages(ctx):
+    family = ctx.platform.family
+    check = {"fedora": _rpmdb, "debian": _dpkg, "arch": _pacman, "suse": _zypper}[family]
+    level, summary, ev, guidance = check(ctx)
+    return finding("updates.packages", CAT, "Package database", level, summary, evidence=ev, guidance=guidance,
+                   reason=ev[0] if level == UNKNOWN else "")
+
+
+# ── configuration files left for review by package updates ──────────────────
+LEFTOVER = {
+    "fedora": (".rpmnew", ".rpmsave"),
+    "suse": (".rpmnew", ".rpmsave", ".rpmorig"),
+    "debian": (".dpkg-dist", ".dpkg-new", ".dpkg-old", ".ucf-dist", ".ucf-new", ".ucf-old"),
+    "arch": (".pacnew", ".pacsave"),
+}
+MAX_VISIT = 20000
+
+
+@probe("updates.config_files", CAT, "Config files to review", applies=KNOWN_FAMILY)
+def config_files(ctx):
+    title = "Config files to review"
+    suffixes = LEFTOVER[ctx.platform.family]
+    found, visited, unreadable = [], 0, 0
+    stack = [("/etc", 0)]
+    while stack and visited < MAX_VISIT:
+        directory, depth = stack.pop()
         try:
-            info = os.stat(p)
-        except FileNotFoundError:
+            entries = list(os.scandir(ctx.path(directory)))
+        except OSError:
+            unreadable += 1
             continue
-        except OSError as exc:
-            rows.append((path, f"unreadable ({exc.strerror})", False))
-            continue
-        mode = stat.S_IMODE(info.st_mode)
-        if info.st_uid != ctx.trusted_uid or mode & 0o022:
-            rows.append((path, f"IGNORED by updater: uid={info.st_uid} mode={mode:04o} "
-                               f"(needs root owner, no group/world write)", False))
-            continue
-        if not os.access(p, os.R_OK):
-            rows.append((path, "not readable", False))
-            continue
-        rows.append((path, f"trusted (uid=0 mode={mode:04o})", chosen is None))
-        if chosen is None:
-            chosen = path
-    return rows, chosen
+        for entry in entries:
+            visited += 1
+            path = f"{directory}/{entry.name}"
+            if entry.name.endswith(suffixes):
+                found.append(path)
+            elif depth < 6 and entry.is_dir(follow_symlinks=False):
+                stack.append((path, depth + 1))
+    if not visited and unreadable:
+        return finding("updates.config_files", CAT, title, UNKNOWN, "/etc could not be read",
+                       reason="/etc is missing or not readable by this user.")
+    ev = [f"looked for {', '.join(suffixes)} under /etc: {visited} entries"
+          + (f", {unreadable} folder(s) not readable by this user" if unreadable else "")
+          + (", stopped at the limit" if visited >= MAX_VISIT else "")]
+    ev += sorted(found)[:20]
+    if not found:
+        return finding("updates.config_files", CAT, title, PASS, "No config files left for review by updates",
+                       evidence=ev)
+    tool = {"arch": "`pacdiff` (from pacman-contrib)", "fedora": "`rpmconf -a` or a diff tool",
+            "debian": "a diff tool, for example `diff -u /etc/x /etc/x.dpkg-dist`", "suse": "a diff tool"}
+    return finding("updates.config_files", CAT, title, INFO,
+                   f"{len(found)} config file(s) left by package updates to review", evidence=ev,
+                   guidance=["When an update brings a new version of a config file you changed, the package "
+                             "manager keeps yours and puts the new one beside it (or the reverse). Until you "
+                             "merge them, you miss the new defaults.",
+                             f"Compare and merge with {tool[ctx.platform.family]}, then remove the leftover. "
+                             "Doctor changes nothing."])
 
 
-@probe("updates.updater", CAT, "FE-Xico Updater")
-def updater(ctx):
-    marker = (ctx.try_text(BUILD_MARKER, 64) or "").strip()
-    exe = ctx.exists("/usr/bin/fe-xico-updater")
-    ev = [f"{BUILD_MARKER}: {marker or 'absent'}", f"/usr/bin/fe-xico-updater: {'present' if exe else 'absent'}",
-          f"{HELPER}: {'present' if ctx.exists(HELPER) else 'absent'}"]
-    if marker == "skipped" and not exe:
-        return finding("updates.updater", CAT, "FE-Xico Updater", INFO,
-                       "FE-Xico Updater was not included in this image build (optional)", evidence=ev,
-                       guidance=["Updates still work with `sudo bootc upgrade` in Foot."])
-    if not exe:
-        return finding("updates.updater", CAT, "FE-Xico Updater", WARN if marker == "installed" else UNKNOWN,
-                       "Updater marked installed but its executable is missing" if marker == "installed"
-                       else "FE-Xico Updater installation state unknown", evidence=ev)
-    rows, chosen = _config_candidates(ctx)
-    ev += [f"{path}: {state}" + (" ← used" if used else "") for path, state, used in rows]
-    ignored = [path for path, state, _ in rows if state.startswith("IGNORED")]
-    if not chosen:
-        return finding("updates.updater", CAT, "FE-Xico Updater", ERROR,
-                       "Updater has no trusted configuration; its update actions are unavailable",
-                       evidence=ev, reason="No config.ini passed the updater's ownership/permission check.",
-                       guidance=_perm_guidance(ignored))
-    text = ctx.try_text(chosen, 64 * 1024)
+# ── when the system was last updated ─────────────────────────────────────────
+PACMAN_STAMP = r"^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4})\] "
+
+
+def _pacman_last_upgrade(ctx):
+    """Newest `pacman -Syu` in the recent part of pacman.log; else the newest package change."""
+    text = ctx.tail_text("/var/log/pacman.log", 4 * 1024 * 1024)
+    if text is None:
+        return None, "/var/log/pacman.log unreadable", ""
+    full = re.findall(PACMAN_STAMP + r"\[PACMAN\] starting full system upgrade", text, re.M)
+    if full:
+        return (datetime.datetime.strptime(full[-1], "%Y-%m-%dT%H:%M:%S%z"),
+                f"pacman.log: last full system upgrade started {full[-1]}", "Last full system upgrade")
+    changed = re.findall(PACMAN_STAMP + r"\[ALPM\] (?:upgraded|installed|downgraded) ", text, re.M)
+    if changed:
+        return (datetime.datetime.strptime(changed[-1], "%Y-%m-%dT%H:%M:%S%z"),
+                f"pacman.log: no full system upgrade in the recent log; last package change {changed[-1]}",
+                "No full system upgrade recently; packages last changed")
+    return None, "pacman.log records no upgrade", ""
+
+
+def _rpm_last_install(ctx):
+    res = ctx.runner.run("rpm", "-qa", "--queryformat=%{INSTALLTIME}\\n")
+    if not res.ok:
+        return None, res.describe(), ""
+    stamps = [int(x) for x in res.stdout.split() if x.isdigit()]
+    if not stamps:
+        return None, "rpm reported no install times", ""
+    when = datetime.datetime.fromtimestamp(max(stamps), datetime.timezone.utc)
+    return when, f"newest package install time in the RPM database: {when:%Y-%m-%d %H:%M} UTC", ""
+
+
+def _dpkg_last_change(ctx):
+    when = ctx.mtime("/var/lib/dpkg/status")
+    if when is None:
+        return None, "/var/lib/dpkg/status unreadable", ""
+    return when, f"/var/lib/dpkg/status last changed {when:%Y-%m-%d %H:%M} UTC", ""
+
+
+UPDATE_COMMAND = {"arch": "`sudo pacman -Syu`", "debian": "`sudo apt update && sudo apt upgrade`",
+                  "fedora": "`sudo dnf upgrade --refresh`",
+                  "suse": "`sudo zypper dup` (Tumbleweed) or `sudo zypper up` (Leap)"}
+
+
+@probe("updates.last_update", CAT, "Last update", applies=PACKAGE_FAMILIES)
+def last_update(ctx):
+    title = "Last update"
+    family = ctx.platform.family
+    reader = {"arch": _pacman_last_upgrade, "debian": _dpkg_last_change,
+              "fedora": _rpm_last_install, "suse": _rpm_last_install}[family]
+    when, source, what = reader(ctx)
+    if when is None:
+        return finding("updates.last_update", CAT, title, UNKNOWN, "When the system was last updated is unknown",
+                       evidence=[source], reason=source)
+    days = _days(ctx, when)
+    what = what or "Packages last changed"
+    ev = [source, f"WARN after {STALE_UPDATE_DAYS} days"]
+    if days is not None and days >= STALE_UPDATE_DAYS:
+        return finding("updates.last_update", CAT, title, WARN, f"{what} {_ago(days)}", evidence=ev,
+                       guidance=["Security fixes arrive through updates; a month without them leaves known "
+                                 "problems unfixed.",
+                                 f"Update with your software center or {UPDATE_COMMAND[family]}."])
+    return finding("updates.last_update", CAT, title, PASS, f"{what} {_ago(days)}", evidence=ev)
+
+
+# ── automatic updates ────────────────────────────────────────────────────────
+#: (unit, what it does when on). Only read with `systemctl is-enabled`.
+AUTO_UNITS = {
+    "ostree": (("rpm-ostreed-automatic.timer", "rpm-ostree"),
+               ("bootc-fetch-apply-updates.timer", "bootc downloads and applies updates, then restarts the "
+                                                   "computer by itself"),
+               ("uupd.timer", "uupd (Universal Blue) updates the system image, Flatpaks and more"),
+               ("ublue-update.timer", "ublue-update (Universal Blue) updates the system image, Flatpaks and more"),
+               ("fe-xicoos-auto-update.timer", "FE-XicoOS stages updates in the background; they apply when you "
+                                               "restart")),
+    "fedora": (("dnf-automatic.timer", "dnf-automatic"),
+               ("dnf5-automatic.timer", "dnf-automatic"),
+               ("dnf-automatic-install.timer", "dnf-automatic installs updates")),
+    "debian": (("apt-daily-upgrade.timer", "unattended-upgrades installs updates (by default security updates "
+                                           "only)"),),
+    "suse": (("transactional-update.timer", "transactional-update installs updates into a new snapshot; they "
+                                            "apply when you restart"),),
+    "arch": (),
+}
+
+
+def _ini(ctx, absolute):
+    import configparser
     parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.optionxform = str
     try:
-        parser.read_string(text or "")
-    except configparser.Error as exc:
-        return finding("updates.updater", CAT, "FE-Xico Updater", WARN, "Updater configuration is malformed",
-                       evidence=ev, reason=str(exc).splitlines()[0][:200])
-    commands = dict(parser.items("Commands")) if parser.has_section("Commands") else {}
-    missing = [k for k in EXPECTED_COMMANDS if not commands.get(k, "").strip()]
-    custom = [k for k, v in EXPECTED_COMMANDS.items() if commands.get(k, "").strip() not in ("", v)]
-    # Show command *names* only; values are never executed or echoed.
-    ev += [f"[Commands] {k}: " + ("missing" if k in missing else "custom value" if k in custom else "FE-XicoOS default")
-           for k in EXPECTED_COMMANDS]
-    if missing:
-        return finding("updates.updater", CAT, "FE-Xico Updater", WARN,
-                       f"Updater configuration lacks {len(missing)} command(s)", evidence=ev,
-                       guidance=["Compare with the image default in /usr/etc/fe-xico-updater/config.ini."])
-    if ignored:
-        return finding("updates.updater", CAT, "FE-Xico Updater", WARN,
-                       f"Updater ignores {ignored[0]} (unsafe permissions) and uses {chosen}",
-                       evidence=ev, guidance=_perm_guidance(ignored))
-    if custom:
-        return finding("updates.updater", CAT, "FE-Xico Updater", WARN,
-                       "Updater uses customized system commands", evidence=ev,
-                       guidance=["Custom commands run with the updater's authorization. Make sure you "
-                                 "set them deliberately. Doctor never runs them."])
-    return finding("updates.updater", CAT, "FE-Xico Updater", PASS,
-                   "Installed; trusted configuration with FE-XicoOS default commands", evidence=ev)
+        parser.read_string(ctx.try_text(absolute, 64 * 1024) or "")
+    except configparser.Error:
+        return None
+    return parser
 
 
-def _perm_guidance(ignored):
-    steps = ["The updater only trusts config files owned by root and not writable by group/others "
-             "(it refuses e.g. mode 0777)."]
-    for path in ignored[:2]:
-        steps.append(f"Fix by hand if you agree: `sudo chown root:root {path} && sudo chmod 0644 {path}`. "
-                     "Doctor never changes permissions.")
-    return steps
+def _rpm_ostree_policy(ctx):
+    """AutomaticUpdatePolicy from /etc/rpm-ostreed.conf: none (default), check or stage."""
+    parser = _ini(ctx, "/etc/rpm-ostreed.conf")
+    value = parser.get("Daemon", "AutomaticUpdatePolicy", fallback="none") if parser else "none"
+    return (value or "none").strip().lower()
 
 
-@probe("updates.notifier", CAT, "Update notifications")
-def notifier(ctx):
-    state, res = unit_file_state(ctx, "fe-xicoos-update-notifier.timer", user=True)
-    ev = [f"user fe-xicoos-update-notifier.timer: {state or 'unknown'}", res.describe()]
-    if not state:
-        return finding("updates.notifier", CAT, "Update notifications", UNKNOWN,
-                       "User session manager not reachable", reason=res.describe(), evidence=ev,
-                       guidance=["Expected when Doctor runs outside a desktop session (e.g. over SSH)."])
-    if state in ENABLED:
-        return finding("updates.notifier", CAT, "Update notifications", PASS,
-                       "Desktop notifications for automatic updates are on", evidence=ev)
-    if state == "not-found":
-        return finding("updates.notifier", CAT, "Update notifications", INFO,
-                       "Update notifier not installed for this user", evidence=ev)
-    return finding("updates.notifier", CAT, "Update notifications", INFO,
-                   f"Update notifier is {state}; automatic results will not pop up", evidence=ev)
+def _dnf_automatic(ctx):
+    """apply_updates from /etc/dnf/automatic.conf (dnf4 and dnf5 both default to no)."""
+    parser = _ini(ctx, "/etc/dnf/automatic.conf")
+    value = parser.get("commands", "apply_updates", fallback="no") if parser else "no"
+    return (value or "no").strip().lower() in ("yes", "true", "1", "on")
+
+
+def _unattended_upgrades(ctx):
+    """Debian/Ubuntu: APT::Periodic::Unattended-Upgrade from apt.conf.d (later files win)."""
+    value = None
+    source = ""
+    for name in ctx.listdir("/etc/apt/apt.conf.d"):
+        text = ctx.try_text(f"/etc/apt/apt.conf.d/{name}", 64 * 1024) or ""
+        text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(("//", "#")))
+        for m in re.finditer(r'APT::Periodic::Unattended-Upgrade\s+"(\d+)"\s*;', text):
+            value, source = m.group(1), name
+    return value, source
+
+
+@probe("updates.automatic", CAT, "Automatic updates", applies=AUTO_UPDATES)
+def automatic(ctx):
+    title = "Automatic updates"
+    p = ctx.platform
+    kind = "ostree" if p.ostree else p.family
+    if kind == "arch":
+        return finding("updates.automatic", CAT, title, INFO, "Arch updates only when you run them",
+                       evidence=["Arch-based systems have no automatic system updates by default."],
+                       guidance=[f"Update regularly with {UPDATE_COMMAND['arch']}, and read the Arch news "
+                                 "before large upgrades."])
+    ev, enabled, unreadable = [], [], 0
+    for unit, what in AUTO_UNITS[kind]:
+        state, res = unit_file_state(ctx, unit)
+        ev.append(f"{unit}: {state or res.describe()}")
+        if not state:
+            unreadable += 1
+            continue
+        if state not in ENABLED:
+            continue
+        if unit == "rpm-ostreed-automatic.timer":
+            policy = _rpm_ostree_policy(ctx)
+            ev.append(f"/etc/rpm-ostreed.conf AutomaticUpdatePolicy={policy}")
+            if policy == "none":
+                continue  # the timer runs, but the policy tells it to do nothing
+            what = ("rpm-ostree downloads and stages updates; they apply when you restart" if policy == "stage"
+                    else f"rpm-ostree checks for updates (policy {policy})")
+        elif what == "dnf-automatic":
+            applies = _dnf_automatic(ctx)
+            ev.append(f"/etc/dnf/automatic.conf apply_updates={'yes' if applies else 'no'}")
+            what = "dnf-automatic installs updates" if applies else "dnf-automatic downloads updates for you to install"
+        enabled.append((unit, what))
+    if kind == "debian":
+        value, source = _unattended_upgrades(ctx)
+        installed = ctx.exists("/usr/bin/unattended-upgrade")
+        ev.append(f"unattended-upgrades: {'installed' if installed else 'not installed'}; "
+                  f"APT::Periodic::Unattended-Upgrade={value or 'unset'}" + (f" ({source})" if source else ""))
+        if not (installed and value and value != "0"):
+            enabled = [e for e in enabled if e[0] != "apt-daily-upgrade.timer"]
+        if p.has("snap"):
+            ev.append("snaps refresh themselves (snapd)")
+    if AUTO_UNITS[kind] and unreadable == len(AUTO_UNITS[kind]):
+        return finding("updates.automatic", CAT, title, UNKNOWN, "Automatic update settings could not be read",
+                       evidence=ev, reason="systemctl did not answer.")
+    software_center = ("Desktop software centers (GNOME Software, KDE Discover) can also download updates "
+                       "for you; Doctor does not read their settings.")
+    if not enabled:
+        return finding("updates.automatic", CAT, title, INFO, "No automatic update service is on", evidence=ev,
+                       guidance=["That is a choice, not a fault: update regularly with your software center or "
+                                 "package manager.", software_center])
+    reboots = any(unit == "bootc-fetch-apply-updates.timer" for unit, _ in enabled)
+    ev += [f"on: {unit} — {what}" for unit, what in enabled]
+    summary = "Automatic updates are on" + (" and restart this computer by themselves" if reboots else "")
+    guidance = ([enabled[0][1][0].upper() + enabled[0][1][1:] + "."] if len(enabled) == 1 else [])
+    if reboots:
+        guidance.append("bootc-fetch-apply-updates.timer restarts the computer after applying an update, even "
+                        "with unsaved work open. To stop that: "
+                        "`sudo systemctl disable --now bootc-fetch-apply-updates.timer`.")
+    return finding("updates.automatic", CAT, title, INFO, summary, evidence=ev, guidance=guidance)

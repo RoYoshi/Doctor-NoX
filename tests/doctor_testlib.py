@@ -109,14 +109,78 @@ class Tree:
         return Context(root=self.root, env=env or {}, runner=runner or FakeRunner(), **kw)
 
 
-def fe_xico_os_release(tree, variant="NVIDIA", version="44.20261030.0"):
-    tree.write("/usr/lib/os-release",
-               f'NAME="FE-Xico"\nVERSION_ID="44"\nFE_XICO_VERSION="{version}"\n'
-               f'FE_XICO_VARIANT="{variant}"\nVARIANT="{variant}"\n')
+# ── distributions ────────────────────────────────────────────────────────────
+OS_RELEASE = {
+    "fedora": 'NAME="Fedora Linux"\nVERSION_ID=44\nID=fedora\nVARIANT_ID=kde\n'
+              'PRETTY_NAME="Fedora Linux 44 (KDE Plasma Desktop Edition)"\n',
+    "silverblue": 'NAME="Fedora Linux"\nVERSION_ID=44\nID=fedora\nVARIANT_ID=silverblue\n'
+                  'PRETTY_NAME="Fedora Linux 44.20261030.0 (Silverblue)"\n',
+    "bazzite": 'NAME="Bazzite"\nVERSION_ID=44\nID=bazzite\nID_LIKE="fedora"\nPRETTY_NAME="Bazzite 44 (FROM Fedora Kinoite)"\n',
+    "fe-xicoos": 'NAME="FE-Xico"\nVERSION_ID="44"\nID=fe-xicoos\nID_LIKE="fedora"\nPRETTY_NAME="FE-XicoOS 44"\n',
+    "almalinux": 'NAME="AlmaLinux"\nVERSION_ID="10.0"\nID="almalinux"\nID_LIKE="rhel centos fedora"\n'
+                 'PRETTY_NAME="AlmaLinux 10.0 (Purple Lion)"\n',
+    "ubuntu": 'NAME="Ubuntu"\nVERSION_ID="24.04"\nID=ubuntu\nID_LIKE=debian\nPRETTY_NAME="Ubuntu 24.04.3 LTS"\n',
+    "debian": 'NAME="Debian GNU/Linux"\nVERSION_ID="13"\nID=debian\nPRETTY_NAME="Debian GNU/Linux 13 (trixie)"\n',
+    "mint": 'NAME="Linux Mint"\nVERSION_ID="22.2"\nID=linuxmint\nID_LIKE="ubuntu debian"\nPRETTY_NAME="Linux Mint 22.2"\n',
+    "pop": 'NAME="Pop!_OS"\nVERSION_ID="24.04"\nID=pop\nID_LIKE="ubuntu debian"\nPRETTY_NAME="Pop!_OS 24.04 LTS"\n',
+    "arch": 'NAME="Arch Linux"\nID=arch\nBUILD_ID=rolling\nPRETTY_NAME="Arch Linux"\n',
+    "cachyos": 'NAME="CachyOS Linux"\nID=cachyos\nID_LIKE=arch\nBUILD_ID=rolling\nPRETTY_NAME="CachyOS"\n',
+    "steamos": 'NAME="SteamOS"\nVERSION_ID=3.7.13\nID=steamos\nID_LIKE=arch\nPRETTY_NAME="SteamOS"\n',
+    "tumbleweed": 'NAME="openSUSE Tumbleweed"\nVERSION_ID="20261101"\nID="opensuse-tumbleweed"\n'
+                  'ID_LIKE="opensuse suse"\nPRETTY_NAME="openSUSE Tumbleweed"\n',
+    "leap": 'NAME="openSUSE Leap"\nVERSION_ID="16.0"\nID="opensuse-leap"\nID_LIKE="suse opensuse"\n'
+            'PRETTY_NAME="openSUSE Leap 16.0"\n',
+    "aeon": 'NAME="openSUSE Aeon"\nVERSION_ID="20261101"\nID="opensuse-aeon"\n'
+            'ID_LIKE="suse opensuse opensuse-tumbleweed microos"\nPRETTY_NAME="openSUSE Aeon"\n',
+    "nixos": 'NAME=NixOS\nVERSION_ID="25.05"\nID=nixos\nPRETTY_NAME="NixOS 25.05 (Warbler)"\n',
+    "alpine": 'NAME="Alpine Linux"\nVERSION_ID=3.22.2\nID=alpine\nPRETTY_NAME="Alpine Linux v3.22"\n',
+}
+#: name: (os-release key, systemd, OSTree, package tools, kernel)
+PRESETS = {
+    "fedora": ("fedora", True, False, ("dnf", "rpm", "flatpak"), KERNEL),
+    "silverblue": ("silverblue", True, True, ("rpm", "rpm-ostree", "bootc", "flatpak"), KERNEL),
+    "bazzite": ("bazzite", True, True, ("rpm", "rpm-ostree", "bootc", "flatpak"), KERNEL),
+    "fe-xicoos": ("fe-xicoos", True, True, ("rpm", "rpm-ostree", "bootc", "flatpak"), KERNEL),
+    "almalinux": ("almalinux", True, False, ("dnf", "rpm"), "6.12.0-55.9.1.el10_0.x86_64"),
+    "ubuntu": ("ubuntu", True, False, ("apt", "dpkg", "snap"), "6.8.0-49-generic"),
+    "debian": ("debian", True, False, ("apt", "dpkg"), "6.12.48+deb13-amd64"),
+    "mint": ("mint", True, False, ("apt", "dpkg", "flatpak"), "6.8.0-49-generic"),
+    "pop": ("pop", True, False, ("apt", "dpkg", "flatpak"), "6.16.3-76061603-generic"),
+    "arch": ("arch", True, False, ("pacman",), "6.17.4-arch1-1"),
+    "cachyos": ("cachyos", True, False, ("pacman", "flatpak"), "6.17.4-2-cachyos"),
+    "steamos": ("steamos", True, False, ("pacman", "flatpak"), "6.11.11-valve19-1-neptune-611"),
+    "tumbleweed": ("tumbleweed", True, False, ("zypper", "rpm", "flatpak"), "6.17.5-1-default"),
+    "leap": ("leap", True, False, ("zypper", "rpm"), "6.12.0-160000.5-default"),
+    "aeon": ("aeon", True, False, ("zypper", "rpm", "flatpak"), "6.17.5-1-default"),
+    "nixos": ("nixos", True, False, ("nix",), "6.12.55"),
+    "alpine": ("alpine", False, False, ("apk",), "6.12.57-0-lts"),
+}
+
+
+def install_distro(tree, name):
+    """Write the os-release, init marker and package tools that make `tree` look like `name`.
+
+    Returns the kernel release that distribution would run.
+    """
+    from doctor_nox import distro
+    key, systemd, ostree, tools, kernel = PRESETS[name]
+    tree.write("/usr/lib/os-release", OS_RELEASE[key])
+    if systemd:
+        tree.mkdir("/run/systemd/system")
+    if ostree:
+        tree.write("/run/ostree-booted", "")
+    paths = dict(distro._TOOLS)
+    for tool in tools:
+        first = paths[tool][0]
+        if tool == "nix":
+            tree.mkdir(first)
+        else:
+            tree.write(first, "", 0o755)
+    return kernel
 
 
 # ── bootc v1 fixtures (shape of `bootc status --json --format-version=1`) ──────
-IMAGE = "ghcr.io/royoshi/fe-xicoos:latest"
+IMAGE = "ghcr.io/ublue-os/bazzite:stable"
 
 
 def bootc_entry(version, digest_char="a", *, ref=IMAGE, pinned=False, download_only=None, incompatible=False):
@@ -143,3 +207,21 @@ def bootc_host(*, staged=None, rollback=True, queued=False, spec_ref=IMAGE, othe
                    "rollbackQueued": queued, "type": "bootcHost",
                    "otherDeployments": others or []},
     }
+
+
+# ── rpm-ostree fixtures (shape of `rpm-ostree status --json`) ─────────────────
+OSTREE_REF = "ostree-image-signed:docker://ghcr.io/ublue-os/bazzite:stable"
+
+
+def ostree_entry(version, checksum="a", *, booted=False, staged=False, pinned=False, ref=OSTREE_REF,
+                 layered=(), unlocked="none", timestamp=1793404800):
+    return {"id": f"default-{checksum * 8}.0", "osname": "default", "serial": 0, "checksum": checksum * 64,
+            "version": version, "timestamp": timestamp, "booted": booted, "staged": staged, "pinned": pinned,
+            "unlocked": unlocked, "container-image-reference": ref,
+            "container-image-reference-digest": "sha256:" + checksum * 64,
+            "requested-packages": list(layered), "requested-local-packages": [],
+            "requested-base-removals": [], "requested-base-local-replacements": []}
+
+
+def ostree_status(*entries):
+    return {"deployments": list(entries), "transaction": None, "cached-update": None, "update-driver": None}

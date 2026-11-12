@@ -1,116 +1,112 @@
-"""Default Flatpaks and FE-XicoOS core applications (presence only, never launched)."""
+"""Flatpak and Snap: remotes, installed apps, and whether installed apps can appear in menus.
+
+Apps are listed, never launched, updated or removed.
+"""
 from __future__ import annotations
 
 import re
 
+from ..distro import FLATPAK, SNAP
 from ..model import INFO, PASS, UNKNOWN, WARN
 from . import finding, probe
-from .updates import unit_show
 
 CAT = "software"
-MANIFEST = "/usr/share/fe-xicoos/default-flatpaks.txt"
-MARKER = "/var/lib/fe-xicoos/default-flatpaks-v4.done"
-SERVICE = "fe-xicoos-flatpaks.service"
 APP_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def _list(ctx, scope):
-    res = ctx.runner.run("flatpak", "list", f"--{scope}", "--app", "--columns=application")
-    if not res.ok:
-        return None, res
-    return {l.strip() for l in res.stdout.splitlines() if APP_ID.fullmatch(l.strip())}, res
+def _lines(res, pattern):
+    return sorted({l.strip() for l in res.stdout.splitlines() if pattern.fullmatch(l.strip())})
 
 
-@probe("software.flatpaks", CAT, "Default Flatpaks")
-def flatpaks(ctx):
-    text = ctx.try_text(MANIFEST, 16 * 1024)
-    if text is None:
-        return finding("software.flatpaks", CAT, "Default Flatpaks", UNKNOWN, "Default Flatpak manifest missing",
-                       reason=f"{MANIFEST} is not readable")
-    defaults = [l.strip() for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")
-                and APP_ID.fullmatch(l.strip())]
-    system, res_sys = _list(ctx, "system")
-    if system is None:
-        return finding("software.flatpaks", CAT, "Default Flatpaks", UNKNOWN, "Could not list Flatpaks",
-                       reason=res_sys.describe())
-    user, res_user = _list(ctx, "user")
-    provisioned = ctx.exists(MARKER)
-    props, res_show = unit_show(ctx, SERVICE)
-    service = ", ".join(f"{k}={props[k]}" for k in ("ActiveState", "SubState", "Result") if k in props) \
-        or res_show.describe()
-    ev = [f"manifest: {len(defaults)} app(s)", f"provisioning marker {MARKER}: {'present' if provisioned else 'absent'}",
-          f"{SERVICE}: {service}"]
-    rows, missing, user_only = [], [], []
-    for app in defaults:
-        if app in system:
-            rows.append(f"{app}: system")
-        elif user and app in user:
-            rows.append(f"{app}: user only")
-            user_only.append(app)
-        else:
-            rows.append(f"{app}: not installed")
-            missing.append(app)
-    ev += rows
-    if user is None:
-        ev.append(f"user installation not readable: {res_user.describe()}")
-    if not missing:
-        note = f" ({len(user_only)} installed per-user)" if user_only else ""
-        return finding("software.flatpaks", CAT, "Default Flatpaks", PASS,
-                       f"All {len(defaults)} default apps installed{note}", evidence=ev)
-    failed = props.get("Result") not in (None, "", "success") or props.get("ActiveState") == "failed"
-    running = props.get("ActiveState") in ("activating", "active") and props.get("SubState") in ("start", "running")
-    if not provisioned and running:
-        return finding("software.flatpaks", CAT, "Default Flatpaks", INFO,
-                       f"Default apps are being installed now ({len(missing)} remaining)", evidence=ev)
-    if not provisioned and failed:
-        return finding("software.flatpaks", CAT, "Default Flatpaks", WARN,
-                       f"Default app provisioning failed; {len(missing)} app(s) missing", evidence=ev,
-                       guidance=[f"`journalctl -u {SERVICE}` shows the error (often no network on first boot).",
-                                 "fe-xicoos-flatpaks.timer retries automatically every 2 hours."])
-    if not provisioned:
-        return finding("software.flatpaks", CAT, "Default Flatpaks", INFO,
-                       f"Default apps not provisioned yet ({len(missing)} pending)", evidence=ev,
-                       guidance=["Provisioning runs after first login when Flathub is reachable and retries "
-                                 "every 2 hours. This is normal on a fresh install."])
-    return finding("software.flatpaks", CAT, "Default Flatpaks", INFO,
-                   f"{len(missing)} default app(s) not installed: " + ", ".join(missing[:3]), evidence=ev,
-                   guidance=["Provisioning already completed, so these were probably removed on purpose. "
-                             "FE-XicoOS does not reinstall them. Reinstall from Bazaar if you want them."])
+def _flatpak(ctx, *args):
+    res = ctx.runner.run("flatpak", *args)
+    return (_lines(res, APP_ID if args[0] == "list" else REMOTE) if res.ok else None), res
 
 
-CORE = (
-    ("Foot (default terminal)", "/usr/bin/foot", True),
-    ("Dolphin", "/usr/bin/dolphin", True),
-    ("Steam", "/usr/bin/steam", True),
-    ("Doctor NoX", "/usr/bin/doctor-nox", True),
-)
+def menu_dirs(ctx) -> list[str] | None:
+    """The data directories desktop menus read apps from, or None when not in a desktop session.
+
+    Inside a Flatpak sandbox the host's session environment is not visible, so nothing is judged.
+    """
+    if ctx.env.get("XDG_SESSION_TYPE") not in ("wayland", "x11") or ctx.exists("/.flatpak-info"):
+        return None
+    raw = ctx.env.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"  # the spec's default when unset
+    return [d.rstrip("/") for d in raw.split(":") if d]
 
 
-@probe("software.core_apps", CAT, "Core applications")
-def core_apps(ctx):
-    ev, missing = [], []
-    for label, path, required in CORE:
-        present = ctx.exists(path)
-        ev.append(f"{label}: {path} {'present' if present else 'MISSING'}")
-        if required and not present:
-            missing.append(label)
-    part = ctx.runner.run("rpm", "-q", "--queryformat=%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\\n", "konsole-part")
-    if part.ok:
-        ev.append(f"Dolphin F4 terminal: {part.stdout.strip()}")
-    elif part.status == "exit":
-        ev.append("Dolphin F4 terminal: konsole-part NOT installed")
-        missing.append("konsole-part (Dolphin F4 terminal)")
-    else:
-        ev.append(f"Dolphin F4 terminal: {part.describe()}")
-    standalone = ctx.exists("/usr/bin/konsole")
-    ev.append(f"standalone Konsole: {'present' if standalone else 'absent (by design; Foot is the terminal)'}")
+@probe("software.flatpak", CAT, "Flatpak", applies=FLATPAK)
+def flatpak(ctx):
+    title = "Flatpak"
+    sys_remotes, res_sr = _flatpak(ctx, "remotes", "--system", "--columns=name")
+    usr_remotes, _ = _flatpak(ctx, "remotes", "--user", "--columns=name")
+    sys_apps, res_sa = _flatpak(ctx, "list", "--system", "--app", "--columns=application")
+    usr_apps, _ = _flatpak(ctx, "list", "--user", "--app", "--columns=application")
+    if sys_remotes is None and sys_apps is None:
+        return finding("software.flatpak", CAT, title, UNKNOWN, "Flatpak did not answer",
+                       reason=res_sa.describe(), evidence=[res_sr.describe(), res_sa.describe()])
+    ev = [f"system remotes: {', '.join(sys_remotes) if sys_remotes else 'none' if sys_remotes is not None else 'unreadable'}",
+          f"user remotes: {', '.join(usr_remotes) if usr_remotes else 'none' if usr_remotes is not None else 'unreadable'}",
+          f"apps: {len(sys_apps or [])} system-wide, {len(usr_apps or [])} for this user"]
+    remotes = (sys_remotes or []) + (usr_remotes or [])
+    apps = (sys_apps or []) + (usr_apps or [])
+    dirs = menu_dirs(ctx)
+    missing = []
+    if dirs is not None:
+        system_dir = "/var/lib/flatpak/exports/share"
+        # The user folder follows $HOME / $XDG_DATA_HOME, so match it by its tail.
+        user_ok = any(d.endswith("/flatpak/exports/share") and d != system_dir for d in dirs)
+        if sys_apps and system_dir not in dirs:
+            missing.append(system_dir)
+        if usr_apps and not user_ok:
+            missing.append("~/.local/share/flatpak/exports/share")
+        ev.append("XDG_DATA_DIRS " + ("lacks " + ", ".join(missing) if missing else
+                                      "includes the Flatpak app folders" if apps else "not needed yet (no apps)"))
     if missing:
-        return finding("software.core_apps", CAT, "Core applications", WARN,
-                       "Missing from the image: " + ", ".join(missing), evidence=ev,
-                       guidance=["These ship in the FE-XicoOS image. A missing one points at an image build "
-                                 "problem; check the next image or roll back."])
-    if standalone:
-        return finding("software.core_apps", CAT, "Core applications", INFO,
-                       "Core apps present; standalone Konsole is also installed", evidence=ev)
-    return finding("software.core_apps", CAT, "Core applications", PASS,
-                   "Foot, Dolphin (with F4 terminal), Steam and Doctor present", evidence=ev)
+        return finding("software.flatpak", CAT, title, WARN,
+                       "Installed Flatpak apps may be missing from your app menu", evidence=ev,
+                       guidance=["Menus find Flatpak apps through XDG_DATA_DIRS. The Flatpak package sets it at "
+                                 "login, so log out and back in after installing Flatpak for the first time.",
+                                 "If it stays missing, your login does not read /etc/profile.d/flatpak.sh or "
+                                 "Flatpak's systemd environment generator."])
+    if not remotes and not apps:
+        return finding("software.flatpak", CAT, title, INFO, "Flatpak is installed but has no app sources",
+                       evidence=ev, guidance=["Add a remote such as Flathub (flathub.org/setup) to install apps "
+                                              "with Flatpak."])
+    has_flathub = any(r.startswith("flathub") for r in remotes)
+    summary = f"{len(apps)} app(s) from {len(remotes)} source(s)" + (" including Flathub" if has_flathub else "")
+    return finding("software.flatpak", CAT, title, PASS, summary, evidence=ev)
+
+
+@probe("software.snap", CAT, "Snap", applies=SNAP)
+def snap(ctx):
+    title = "Snap"
+    res = ctx.runner.run("snap", "list")
+    if res.status == "exit" and "cannot communicate with server" in (res.stderr + res.stdout):
+        return finding("software.snap", CAT, title, WARN, "snapd is not running, so snaps cannot start or update",
+                       evidence=[res.describe()],
+                       guidance=["`systemctl status snapd.service snapd.socket` shows why."])
+    if not res.ok:
+        return finding("software.snap", CAT, title, UNKNOWN, "Snap did not answer", reason=res.describe(),
+                       evidence=[res.describe()])
+    rows = [line.split() for line in res.stdout.splitlines()[1:] if line.strip()]
+    snaps = [r for r in rows if r and APP_ID.fullmatch(r[0])]
+    broken = [r[0] for r in snaps if len(r) >= 6 and "broken" in r[5].split(",")]
+    disabled = [r[0] for r in snaps if len(r) >= 6 and "disabled" in r[5].split(",")]
+    ev = [f"snaps installed: {len(snaps)}"] + [f"  {r[0]} {r[1] if len(r) > 1 else ''}".rstrip() for r in snaps[:15]]
+    if disabled:
+        ev.append(f"disabled: {', '.join(disabled)}")
+    if broken:
+        return finding("software.snap", CAT, title, WARN, f"Broken snap(s): {', '.join(broken[:3])}", evidence=ev,
+                       guidance=["A broken snap is missing files it needs and will not start.",
+                                 "`snap revert NAME` goes back to its previous revision; reinstalling the snap "
+                                 "also helps. Doctor changes nothing."])
+    dirs = menu_dirs(ctx)
+    if dirs is not None and snaps and "/var/lib/snapd/desktop" not in dirs:
+        ev.append("XDG_DATA_DIRS lacks /var/lib/snapd/desktop")
+        return finding("software.snap", CAT, title, WARN, "Installed snap apps may be missing from your app menu",
+                       evidence=ev, guidance=["Menus find snap apps through XDG_DATA_DIRS, which snapd sets at "
+                                              "login. Log out and back in after installing snapd."])
+    if not snaps:
+        return finding("software.snap", CAT, title, INFO, "No snaps installed", evidence=ev)
+    return finding("software.snap", CAT, title, PASS, f"{len(snaps)} snap(s) installed", evidence=ev)

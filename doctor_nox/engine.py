@@ -34,7 +34,8 @@ def scan(ctx: Context | None = None, *, progress: Progress | None = None,
     """Return a report dict. Never raises for probe failures; never mutates the host."""
     ctx = ctx or Context()
     all_probes = probes if probes is not None else probe_pkg.load_all()
-    todo = [p for p in all_probes if not selected or p.id in selected or p.category in selected]
+    chosen = [p for p in all_probes if not selected or p.id in selected or p.category in selected]
+    todo, skipped = applicable(ctx, chosen)
     started = datetime.datetime.now(datetime.timezone.utc)
     t0 = time.monotonic()
     results: dict[str, list[Finding]] = {}
@@ -102,9 +103,30 @@ def scan(ctx: Context | None = None, *, progress: Progress | None = None,
     try:
         host = host_summary(ctx)
     except Exception:  # identity must never crash the report
-        host = {"name": "unknown", "kernel": ctx.kernel}
+        host = {"name": "unknown", "kernel": ctx.kernel, "family": "other"}
     finished_at = started + datetime.timedelta(seconds=time.monotonic() - t0)
-    return build_report(findings, host, started=started, finished=finished_at, complete=not cancelled)
+    return build_report(findings, host, started=started, finished=finished_at, complete=not cancelled,
+                        not_applicable=skipped)
+
+
+def applicable(ctx: Context, chosen) -> tuple[list, list[dict[str, str]]]:
+    """Split probes into those that apply to this system and the not-applicable list for the report."""
+    try:
+        platform = ctx.platform
+    except Exception:  # detection must never stop a scan; with no platform every probe runs
+        return list(chosen), []
+    todo, skipped = [], []
+    for p in chosen:
+        applies = getattr(p, "applies", None)
+        try:
+            runs = applies is None or applies(platform)
+        except Exception:  # a faulty rule must not hide a check: run it
+            runs = True
+        if runs:
+            todo.append(p)
+        else:
+            skipped.append({"id": p.id, "category": p.category, "title": p.title, "applies_to": applies.text})
+    return todo, skipped
 
 
 def _dedupe(findings):

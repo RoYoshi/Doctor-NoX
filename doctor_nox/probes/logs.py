@@ -6,13 +6,12 @@ import json
 import os
 from pathlib import Path
 
+from ..distro import SYSTEMD
 from ..model import INFO, PASS, UNKNOWN, WARN
 from . import finding, probe
 
 CAT = "logs"
 PARTIAL_HINT = "not seeing messages from other users and the system"
-UNITS = ("fe-xicoos-auto-update.service", "fe-xicoos-upgrade.service",
-         "fe-xicoos-check.service", "fe-xicoos-flatpaks.service")
 
 
 def _message(entry):
@@ -67,7 +66,7 @@ def parse_journal(text):
     return entries
 
 
-@probe("logs.boot", CAT, "Current boot errors")
+@probe("logs.boot", CAT, "Current boot errors", applies=SYSTEMD)
 def boot(ctx):
     res = ctx.runner.run("journalctl", "--boot=0", "--priority=0..3", "--no-pager", "--output=json",
                          "--lines=400")
@@ -79,8 +78,8 @@ def boot(ctx):
     if res.status not in ("ok", "exit") or (res.status == "exit" and not res.stdout.strip()):
         return finding("logs.boot", CAT, "Current boot errors", UNKNOWN, "Journal not readable",
                        reason=res.describe(),
-                       guidance=["Members of the `wheel` or `systemd-journal` groups can read the system "
-                                 "journal. Doctor never elevates to read it."])
+                       guidance=["Members of the `systemd-journal`, `adm` or `wheel` groups can read the "
+                                 "system journal. Doctor never elevates to read it."])
     entries = parse_journal(res.stdout)
     scope = ("only your own logs are visible (no system journal access)" if partial
              else f"system + user journal ({access_note(ctx)})")
@@ -109,42 +108,3 @@ def boot(ctx):
                    f"{len(entries)} error-level entries this boot (no critical entries)", evidence=ev,
                    guidance=["Error-level messages are common and often harmless. "
                              "`journalctl -b -p 3` lists them."])
-
-
-@probe("logs.update_units", CAT, "FE-XicoOS service logs")
-def update_units(ctx):
-    if not journal_present(ctx):
-        return finding("logs.update_units", CAT, "FE-XicoOS service logs", UNKNOWN, "No systemd journal found",
-                       reason="Neither /run/log/journal nor /var/log/journal contains journal files.")
-    ev, errors, warnings, unreadable = [], 0, 0, 0
-    for unit in UNITS:
-        res = ctx.runner.run("journalctl", "--boot=0", f"--unit={unit}", "--priority=0..4", "--no-pager",
-                             "--output=json", "--lines=40")
-        if res.status not in ("ok", "exit"):
-            unreadable += 1
-            ev.append(f"{unit}: {res.describe()}")
-            continue
-        entries = parse_journal(res.stdout)
-        e = sum(p <= 3 for p, _, _ in entries)
-        w = len(entries) - e
-        errors, warnings = errors + e, warnings + w
-        partial = PARTIAL_HINT in res.stderr
-        if partial:
-            unreadable += 1
-        detail = f"{unit}: {e} error, {w} warning" + (" (system journal not visible)" if partial else "")
-        ev.append(detail)
-        for prio, _, msg in entries[-2:]:
-            ev.append(f"    {'err' if prio <= 3 else 'warn'}: {msg}")
-    if unreadable == len(UNITS):
-        return finding("logs.update_units", CAT, "FE-XicoOS service logs", UNKNOWN,
-                       "FE-XicoOS service logs are not visible to this account", evidence=ev,
-                       reason="System journal access is required to read service logs.")
-    if errors:
-        return finding("logs.update_units", CAT, "FE-XicoOS service logs", WARN,
-                       f"{errors} error entr{'y' if errors == 1 else 'ies'} from FE-XicoOS services this boot",
-                       evidence=ev)
-    if warnings:
-        return finding("logs.update_units", CAT, "FE-XicoOS service logs", INFO,
-                       f"{warnings} warning entr{'y' if warnings == 1 else 'ies'}, no errors", evidence=ev)
-    return finding("logs.update_units", CAT, "FE-XicoOS service logs", PASS,
-                   "No warnings or errors from FE-XicoOS services this boot", evidence=ev)

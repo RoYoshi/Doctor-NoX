@@ -1,106 +1,19 @@
 #!/usr/bin/python3 -I
-"""Doctor NoX — read-only FE-XicoOS system-health diagnostics (GUI + CLI).
+"""Doctor NoX launcher for the RPM layout (/usr/share/doctor-nox) and source checkouts.
 
-Exit status (CLI report modes): 0 no ERROR finding, 1 at least one ERROR,
-2 usage error, 3 Doctor itself failed. WARN/UNKNOWN never change the status.
+pip, pipx, Debian and Arch installs use the `doctor-nox` entry point instead;
+both run doctor_nox.cli.main.
 """
-from __future__ import annotations
-
-import argparse
 from pathlib import Path
 import sys
 
-# Installed location first; a source checkout (bin/ next to doctor_nox/) for QA.
+# The RPM's private package directory first; then a source checkout (bin/ next to doctor_nox/).
 for candidate in ("/usr/share/doctor-nox", str(Path(__file__).resolve().parents[1])):
     if Path(candidate, "doctor_nox").is_dir():
         sys.path.insert(0, candidate)
         break
 
-from doctor_nox import VERSION  # noqa: E402
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="doctor-nox",
-        description="Read-only FE-XicoOS health diagnostics. Never needs root, never changes the system, "
-                    "never sends data anywhere. Without options the desktop window opens.",
-        epilog="Exit status for --text/--json/--summary: 0 no ERROR, 1 ERROR found, 2 usage, 3 internal failure.")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--text", action="store_true", help="print the full report as text")
-    mode.add_argument("--json", action="store_true", help="print the report as JSON (schema doctor-nox/report v2)")
-    mode.add_argument("--summary", action="store_true", help="print only the overall state and non-PASS findings")
-    mode.add_argument("--list-checks", action="store_true", help="list diagnostic IDs and exit")
-    mode.add_argument("--gui-smoke-test", action="store_true", help=argparse.SUPPRESS)
-    mode.add_argument("--gui-self-test", action="store_true", help=argparse.SUPPRESS)
-    mode.add_argument("--gui-screenshot", metavar="DIR", help=argparse.SUPPRESS)  # QA: synthetic data only
-    p.add_argument("--redact", action="store_true",
-                   help="produce the redacted sharing version (best-effort; review before posting)")
-    p.add_argument("--only", action="append", metavar="CATEGORY|ID",
-                   help="run only these categories or check IDs (repeatable)")
-    p.add_argument("--deadline", type=float, default=60.0, metavar="SECONDS",
-                   help="overall scan time limit, 5-300 (default 60)")
-    p.add_argument("--version", action="version", version=f"Doctor NoX {VERSION}")
-    return p
-
-
-def main(argv=None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not 5 <= args.deadline <= 300:
-        parser.error("--deadline must be between 5 and 300 seconds")
-
-    report_mode = args.text or args.json or args.summary or args.list_checks
-    gui_check = args.gui_smoke_test or args.gui_self_test or args.gui_screenshot
-    if (args.redact or args.only) and not report_mode and not gui_check:
-        args.text = report_mode = True  # --redact/--only imply a report, never the window
-    if gui_check or not report_mode:
-        if args.redact or args.only:
-            parser.error("--redact/--only apply to --text, --json and --summary")
-        try:
-            from doctor_nox import gui
-        except ImportError as exc:
-            print(f"Doctor NoX's window needs Fedora's python3-pyside6: {exc}\n"
-                  "Text mode still works: doctor-nox --text", file=sys.stderr)
-            return 3
-        if args.gui_smoke_test:
-            return gui.smoke_test()
-        if args.gui_self_test:
-            return gui.self_test()
-        if args.gui_screenshot:
-            return gui.screenshots(args.gui_screenshot)
-        return gui.run()
-
-    from doctor_nox import engine, probes, report
-    from doctor_nox.context import Context
-    if args.list_checks:
-        for p in probes.load_all():
-            print(f"{p.id:28} {p.category:10} {p.title}")
-        return 0
-    known = {p.id for p in probes.load_all()} | {p.category for p in probes.load_all()}
-    unknown = sorted(set(args.only or ()) - known)
-    if unknown:
-        parser.error("unknown check or category: " + ", ".join(unknown))
-    try:
-        ctx = Context()
-        data = engine.scan(ctx, deadline=args.deadline, selected=set(args.only) if args.only else None)
-        if args.redact:
-            data = report.redact_report(data, ctx.user, ctx.hostname)
-        if args.json:
-            sys.stdout.write(report.to_json(data))
-        elif args.summary:
-            sys.stdout.write(report.format_summary(data))
-        else:
-            sys.stdout.write(report.format_text(data))
-    except BrokenPipeError:
-        # e.g. `doctor-nox --text | head`: silence the flush-at-exit error too
-        import os
-        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        return 0
-    except Exception as exc:  # never a traceback for users; report and exit 3
-        print(f"Doctor NoX failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 3
-    return 1 if data["overall"] == "error" else 0
-
+from doctor_nox.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

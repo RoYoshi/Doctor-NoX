@@ -5,7 +5,6 @@ execute only a temporary Python helper script through a test-only allowlist entr
 """
 import ast
 import contextlib
-import importlib.machinery
 import importlib.util
 import io
 import json
@@ -22,12 +21,13 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from doctor_testlib import ROOT, Tree  # noqa: E402
 
-from doctor_nox import engine, model, probes, report, runner, theme, viewmodel as vm  # noqa: E402
+from doctor_nox import cli, engine, model, probes, report, runner, theme, viewmodel as vm  # noqa: E402
 from doctor_nox.model import Finding  # noqa: E402
 from doctor_nox.probes import Probe  # noqa: E402
 
 PKG = ROOT / "doctor_nox"
 APP = ROOT / "bin/doctor-nox"
+CLI = PKG / "cli.py"
 DESKTOP = ROOT / "data/io.github.royoshi.doctornox.desktop"
 SCHEMA = ROOT / "data/doctor-nox-report.schema.json"
 
@@ -48,19 +48,11 @@ elif mode == "env":
 '''
 
 
-def load_cli():
-    loader = importlib.machinery.SourceFileLoader("doctor_nox_cli", str(APP))
-    spec = importlib.util.spec_from_loader("doctor_nox_cli", loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
 def fixture_report(**kw):
     findings = [
-        Finding("system.bootc.booted", "system", "Booted deployment", "pass", "Booted from ghcr.io/royoshi/fe-xicoos:latest",
+        Finding("system.image.booted", "system", "Booted deployment", "pass", "Booted from ghcr.io/ublue-os/bazzite:stable",
                 evidence=["digest sha256:" + "a" * 64]),
-        Finding("updates.legacy_timer", "updates", "Legacy auto-reboot timer", "error", "Legacy timer ENABLED"),
+        Finding("updates.packages", "updates", "Package database", "error", "The RPM database could not be read"),
         Finding("network.link", "network", "Network links", "pass", "Connected on enp5s0",
                 evidence=["enp5s0 (wired): up, addresses: 192.168.1.44, 2a02:8108:1:2::5",
                           "router mac 3c:7c:3f:aa:bb:cc"]),
@@ -73,9 +65,13 @@ def fixture_report(**kw):
     ]
     import datetime
     now = datetime.datetime(2026, 10, 30, 20, 0, tzinfo=datetime.timezone.utc)
-    host = {"name": "FE-Xico", "edition": "NVIDIA", "version": "44.20261030.0", "kernel": "6.17.4-300.fc44.x86_64",
-            "image_variant": "nvidia-open"}
-    return model.build_report(findings, host, started=now, finished=now, complete=kw.get("complete", True))
+    host = {"name": "Bazzite 44 (FROM Fedora Kinoite)", "id": "bazzite", "version": "44", "family": "fedora",
+            "image": "ostree", "kernel": "6.17.4-300.fc44.x86_64", "init": "systemd", "security": "selinux",
+            "package_managers": ["rpm", "rpm-ostree", "bootc", "flatpak"]}
+    skipped = [{"id": "software.snap", "category": "software", "title": "Snap",
+                "applies_to": "systems with Snap"}] if kw.get("skipped") else []
+    return model.build_report(findings, host, started=now, finished=now, complete=kw.get("complete", True),
+                              not_applicable=skipped)
 
 
 SECRETS = ("alice", "fe-royo", "FE-ROYO", "192.168.1.44", "2a02:8108:1:2::5", "3c:7c:3f:aa:bb:cc", "hunter2",
@@ -94,7 +90,15 @@ class RunnerAllowlistTests(unittest.TestCase):
                            ("journalctl", ("--vacuum-size=1M",)), ("flatpak", ("install", "x")),
                            ("modinfo", ("-k", "6.1; rm -rf /", "-F", "filename", "xpad")),
                            ("modinfo", ("-k", "6.17", "-F", "filename", "evil")), ("nmcli", ("networking", "off")),
-                           ("systemctl", ("show", "fe-xicoos-upgrade.service", "--property=ExecStart"))):
+                           ("systemctl", ("show", "fe-xicoos-upgrade.service", "--property=ExecStart")),
+                           ("systemctl", ("is-enabled", "fe-xicoos-upgrade.service")),
+                           ("pacman", ("-Syu",)), ("pacman", ("-Rns", "foo")), ("pacman", ("-Q",)),
+                           ("dpkg", ("--configure", "-a")), ("dpkg", ("-i", "x.deb")), ("apt-get", ("upgrade",)),
+                           ("zypper", ("dup",)), ("snap", ("refresh",)), ("snap", ("remove", "firefox")),
+                           ("rpm-ostree", ("upgrade",)), ("rpm-ostree", ("rollback",)), ("rpm-ostree", ("status",)),
+                           ("flatpak", ("remotes", "--show-details")), ("flatpak", ("update",)),
+                           ("rpm", ("-qa",)), ("rpm", ("-q", "--queryformat=%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\\n",
+                                                     "bash"))):
             with self.subTest(name=name, args=args), mock.patch("subprocess.Popen") as popen:
                 with self.assertRaises(runner.CommandNotAllowed):
                     r.run(name, *args)
@@ -112,6 +116,18 @@ class RunnerAllowlistTests(unittest.TestCase):
                             self.assertIsNone(token.fullmatch(verb), f"{name}: regex accepts {verb}")
             for path in spec.paths:
                 self.assertTrue(path.startswith("/usr/"), path)
+
+    def test_multi_call_tools_keep_the_name_they_were_found_under(self):
+        """modinfo is a link to kmod: kmod picks its job from argv[0], so argv[0] must stay "modinfo"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            link = os.path.join(tmp, "modinfo-like")
+            os.symlink(os.path.realpath("/bin/sh"), link)
+            spec = runner.CommandSpec((link,), (("-c", "echo $0"),), timeout=5.0)
+            with mock.patch.dict(runner.ALLOWED, {"multicall": spec}):
+                r = runner.Runner(resolve=lambda paths: (os.path.realpath(paths[0]), "ok"))
+                res = r.run("multicall", "-c", "echo $0")
+        self.assertTrue(res.ok, res.describe())
+        self.assertEqual(res.stdout.strip(), link)
 
     def test_untrusted_and_missing_binaries(self):
         with tempfile.NamedTemporaryFile(dir="/tmp", delete=False) as tmp:
@@ -287,15 +303,21 @@ class ReportTests(unittest.TestCase):
         self.assertTrue(shared["redacted"])
         self.assertIn("REDACTED SHARING REPORT", report.format_text(shared))
         self.assertIn("sha256:aaaaaaaaaaaa…", report.to_json(shared), "digests are shortened, not destroyed")
-        self.assertIn("ghcr.io/royoshi/fe-xicoos:latest", report.to_json(shared))
+        self.assertIn("ghcr.io/ublue-os/bazzite:stable", report.to_json(shared))
         self.assertIn("alice", report.to_json(rep), "the full local report is not modified")
+        self.assertEqual(shared["host"]["package_managers"], ["rpm", "rpm-ostree", "bootc", "flatpak"],
+                         "list values stay lists")
+        self.assertEqual(model.validate_report(shared), [])
 
     def test_redaction_keeps_ordinary_text(self):
         terms = report.identity_terms("alice", "fe-xico")
-        for text in ("09:30:15 on 01:00.0", "fe-xicoos-auto-update.timer", "/usr/bin/doctor-nox",
+        for text in ("09:30:15 on 01:00.0", "fe-xicoos-auto-update.timer", "/usr/bin/doctor-nox", "apt-daily-upgrade.timer",
                      "nameserver 127.0.0.53", "No token found", "kernel 6.17.4-300.fc44.x86_64"):
             self.assertEqual(report.redact_text(text, terms), text)
         self.assertEqual(report.identity_terms("root", "localhost"), [])
+        self.assertEqual(report.identity_terms("deck", "steamdeck"), [], "everyone's Steam Deck has these names")
+        self.assertEqual(report.redact_text("Fedora Linux 44 on fedora", report.identity_terms("x", "fedora")),
+                         "Fedora Linux 44 on fedora")
 
     def test_full_report_labelled_and_summary_lists_problems_only(self):
         rep = fixture_report(complete=False)
@@ -304,8 +326,13 @@ class ReportTests(unittest.TestCase):
         self.assertIn("INCOMPLETE", text)
         self.assertIn("No changes were made", text)
         summary = report.format_summary(rep)
-        self.assertIn("Legacy auto-reboot timer", summary)
+        self.assertIn("Package database", summary)
         self.assertNotIn("Booted deployment", summary)
+        self.assertIn("Bazzite 44 (FROM Fedora Kinoite) · Fedora / RHEL family · image-based (OSTree) · kernel", text)
+        rep = fixture_report(skipped=True)
+        self.assertIn("NOT APPLICABLE HERE", report.format_text(rep))
+        self.assertIn("only on systems with Snap", report.format_text(rep))
+        self.assertIn("1 check(s) do not apply", report.format_summary(rep))
 
     def test_export_permissions_and_atomic_write(self):
         rep = fixture_report()
@@ -313,7 +340,7 @@ class ReportTests(unittest.TestCase):
             full = Path(tmp) / "full.json"
             report.export(full, rep, redacted=False, fmt="json")
             self.assertEqual(full.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(json.loads(full.read_text())["findings"][0]["id"], "system.bootc.booted")
+            self.assertEqual(json.loads(full.read_text())["findings"][0]["id"], "system.image.booted")
             shared = Path(tmp) / "shared.txt"
             report.export(shared, rep, redacted=True, fmt="text", user="alice", hostname="fe-royo")
             self.assertEqual(shared.stat().st_mode & 0o777, 0o644)
@@ -326,7 +353,7 @@ class ReportTests(unittest.TestCase):
 # ── CLI ──────────────────────────────────────────────────────────────────────
 class CliTests(unittest.TestCase):
     def setUp(self):
-        self.cli = load_cli()
+        self.cli = cli
 
     def run_cli(self, *argv, scan=None):
         out, err = io.StringIO(), io.StringIO()
@@ -369,7 +396,22 @@ class CliTests(unittest.TestCase):
         self.assertIn("fixture failure", err)
         code, out, _ = self.run_cli("--list-checks")
         self.assertEqual(code, 0)
-        self.assertIn("system.bootc", out)
+        self.assertIn("system.image", out)
+        self.assertTrue(out.startswith("# "), "the first line names the system the list is for")
+
+    def test_launcher_and_module_run_the_same_cli(self):
+        for argv in ([sys.executable, str(APP), "--version"], [sys.executable, "-m", "doctor_nox", "--version"]):
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=ROOT)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("Doctor NoX", res.stdout)
+        self.assertIn("doctor_nox.cli import main", APP.read_text())
+
+    def test_window_without_pyside_names_each_distributions_package(self):
+        with mock.patch.dict(sys.modules, {"doctor_nox.gui": None}):
+            code, _, err = self.run_cli()
+        self.assertEqual(code, 3)
+        for package in ("python3-pyside6", "pyside6 (Arch)", "python3-PySide6", "pipx"):
+            self.assertIn(package, err)
 
     def test_cli_does_not_import_qt_for_reports(self):
         code = subprocess.run([sys.executable, "-c",
@@ -390,7 +432,9 @@ class ViewModelTests(unittest.TestCase):
         items = vm.visible(rep)
         self.assertEqual([f["severity"] for f in items], ["error", "warn", "pass", "pass"])
         self.assertEqual([f["id"] for f in vm.visible(rep, query="is:problem")],
-                         ["updates.legacy_timer", "logs.boot"])
+                         ["updates.packages", "logs.boot"])
+        self.assertEqual(vm.header_text(rep)[0],
+                         "Bazzite 44 (FROM Fedora Kinoite) · image-based (OSTree) · kernel 6.17.4-300.fc44.x86_64")
         self.assertEqual(len(vm.visible(rep, query="enp5s0 connected")), 1)
         self.assertEqual(vm.visible(rep, "network", severities=frozenset({"error"})), [])
         self.assertIn("No checks match", vm.empty_state(rep, False, "network", "", frozenset({"error"})))
@@ -405,6 +449,9 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn("never runs these steps", html)
         self.assertIn("Unknown", html)  # status is always spelled out, not colour alone
         self.assertIn("not a score", vm.overview_html(fixture_report()))
+        self.assertIn("only on systems with Snap", vm.overview_html(fixture_report(skipped=True)))
+        self.assertNotIn("NOT APPLICABLE HERE", vm.overview_html(fixture_report()))
+        self.assertIn("any Linux", vm.overview_html(None))
 
     def test_sidebar_badges_count_problems_and_mark_healthy_groups(self):
         zero = {sev: 0 for sev in model.SEVERITIES}
@@ -589,8 +636,8 @@ class GuiThreadRuleTests(unittest.TestCase):
                                 f"{d.name}.paint must record errors instead of crashing")
 
     def test_screenshot_mode_is_hidden_and_never_scans_the_host(self):
-        cli = APP.read_text()
-        self.assertIn('mode.add_argument("--gui-screenshot", metavar="DIR", help=argparse.SUPPRESS)', cli)
+        source = CLI.read_text()
+        self.assertIn('mode.add_argument("--gui-screenshot", metavar="DIR", help=argparse.SUPPRESS)', source)
         tree = ast.parse((PKG / "gui.py").read_text())
         funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
         for name in ("screenshots", "_demo_report"):
@@ -599,12 +646,12 @@ class GuiThreadRuleTests(unittest.TestCase):
                 self.assertNotIn(banned, body, f"{name} must use synthetic data only")
 
 
-# ── Qt GUI (runs where Fedora's python3-pyside6 is installed, e.g. the image build) ──
+# ── Qt GUI (runs where PySide6 is installed, e.g. the CI containers) ──
 def _have_pyside6():
     return importlib.util.find_spec("PySide6") is not None
 
 
-@unittest.skipUnless(_have_pyside6(), "PySide6 not installed here; the image build runs --gui-self-test instead")
+@unittest.skipUnless(_have_pyside6(), "PySide6 not installed here; CI runs these")
 class GuiTests(unittest.TestCase):
     def run_app(self, flag):
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen")

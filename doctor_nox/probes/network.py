@@ -127,8 +127,8 @@ def dns(ctx):
     text = ctx.try_text("/etc/resolv.conf", 64 * 1024)
     if text is None:
         return finding("network.dns", CAT, "DNS configuration", WARN, "/etc/resolv.conf is missing or unreadable",
-                       guidance=["Name resolution will fail. On Fedora it normally links to "
-                                 "systemd-resolved's stub file."])
+                       guidance=["Name resolution will fail. Your network service (NetworkManager, "
+                                 "systemd-resolved or the DHCP client) normally writes or links it."])
     servers = [l.split()[1] for l in text.splitlines() if l.startswith("nameserver") and len(l.split()) > 1]
     search = sum(1 for l in text.splitlines() if l.startswith(("search", "domain")))
     ev = [f"nameservers: {', '.join(servers) or 'none'}", f"search/domain lines: {search} (contents not shown)"]
@@ -155,7 +155,9 @@ def dns(ctx):
 def manager(ctx):
     res = ctx.runner.run("nmcli", "-t", "-f", "STATE,CONNECTIVITY", "general")
     if res.status == "missing":
-        return finding("network.manager", CAT, "NetworkManager", INFO, "NetworkManager CLI not installed")
+        return finding("network.manager", CAT, "NetworkManager", INFO, "NetworkManager is not installed",
+                       guidance=["Another service (systemd-networkd, iwd, connman or the desktop) may manage "
+                                 "the network instead; the other network checks still apply."])
     if not res.ok:
         return finding("network.manager", CAT, "NetworkManager", UNKNOWN, "NetworkManager not reachable",
                        reason=res.describe())

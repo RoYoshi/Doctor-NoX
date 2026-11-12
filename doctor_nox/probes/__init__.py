@@ -2,12 +2,18 @@
 
 Probes must be read-only, must only execute commands through ctx.runner
 (allowlisted), and must report UNKNOWN with a reason instead of guessing.
+
+Each probe declares where it applies (a distro.Scope). The engine leaves a
+probe out when its scope does not match the system, and lists it in the report
+as not applicable, so a check never reports Unknown just because the system
+is a different kind of Linux.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
 
+from ..distro import EVERYWHERE, Scope
 from ..model import Finding
 
 
@@ -17,16 +23,17 @@ class Probe:
     category: str
     title: str
     func: Callable
+    applies: Scope = EVERYWHERE
 
 
 REGISTRY: list[Probe] = []
 
 
-def probe(id: str, category: str, title: str):
+def probe(id: str, category: str, title: str, applies: Scope = EVERYWHERE):
     def wrap(func):
         if any(p.id == id for p in REGISTRY):
             raise ValueError(f"duplicate probe {id}")
-        REGISTRY.append(Probe(id, category, title, func))
+        REGISTRY.append(Probe(id, category, title, func, applies))
         return func
     return wrap
 

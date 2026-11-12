@@ -14,7 +14,11 @@ import ipaddress
 import json
 import re
 
+from .distro import FAMILY_TITLE
 from .model import CATEGORIES, CATEGORY_TITLE, PASS, SEVERITY_LABEL
+
+IMAGE_TEXT = {"ostree": "image-based (OSTree)", "steamos": "image-based (SteamOS)",
+              "transactional": "transactional updates"}
 
 FULL_NOTICE = ("FULL LOCAL REPORT — may contain your username, hostname, network addresses, image "
                "references and log messages. Use the redacted sharing report for posting online.")
@@ -23,8 +27,12 @@ SHARE_NOTICE = ("REDACTED SHARING REPORT — best-effort removal of usernames, h
                 "automatic redaction cannot catch everything.")
 
 #: Not treated as identifying: replacing them would mangle ordinary text.
-COMMON_NAMES = frozenset({"root", "admin", "user", "guest", "test", "live", "liveuser", "core",
-                          "localhost", "localhost-live", "fedora", "fe-xico", "fexico", "bazzite"})
+#: Distribution default host and user names are shared by everyone who kept them.
+COMMON_NAMES = frozenset({"root", "admin", "user", "guest", "test", "live", "liveuser", "core", "linux",
+                          "localhost", "localhost-live", "localhost.localdomain", "fedora", "silverblue",
+                          "kinoite", "bazzite", "fe-xico", "fexico", "nobara", "ubuntu", "debian", "pop-os",
+                          "mint", "archlinux", "arch", "manjaro", "endeavouros", "cachyos", "steamdeck", "deck",
+                          "steamos", "opensuse", "suse"})
 
 _RULES = [
     # private key material, whole block
@@ -104,7 +112,10 @@ def redact_report(report: dict, user: str = "", hostname: str = "") -> dict:
             f[key] = redact_text(f[key], terms)
         f["evidence"] = [redact_text(line, terms) for line in f["evidence"]]
         f["guidance"] = [redact_text(line, terms) for line in f["guidance"]]
-    shared["host"] = {k: redact_text(v, terms) for k, v in shared["host"].items()}
+    shared["host"] = {k: [redact_text(x, terms) for x in v] if isinstance(v, list) else redact_text(v, terms)
+                      for k, v in shared["host"].items()}
+    for item in shared.get("not_applicable", []):
+        item["title"] = redact_text(item["title"], terms)
     shared["redacted"] = True
     return shared
 
@@ -121,8 +132,9 @@ def _head(report):
         SHARE_NOTICE if report.get("redacted") else FULL_NOTICE,
         f"Snapshot: {report['generated_at']}  ({report['duration_ms']} ms"
         + ("" if report["complete"] else ", INCOMPLETE: scan cancelled or timed out") + ")",
-        f"System:   {h.get('name', '?')} {h.get('version', '')} · edition {h.get('edition') or 'unspecified'} · "
-        f"image {h.get('image_variant') or '?'} · kernel {h.get('kernel', '?')}",
+        "System:   " + " · ".join(bit for bit in (
+            h.get("name") or "unknown Linux", FAMILY_TITLE.get(h.get("family", ""), ""),
+            IMAGE_TEXT.get(h.get("image", ""), ""), f"kernel {h.get('kernel') or '?'}") if bit),
         f"Overall:  {SEVERITY_LABEL[report['overall']]}   "
         + "  ".join(f"{SEVERITY_LABEL[s]} {t[s]}" for s in ("error", "warn", "unknown", "info", "pass")),
     ]
@@ -144,6 +156,10 @@ def format_text(report: dict, *, evidence: bool = True) -> str:
                 out.append(f"          reason: {f['reason']}")
             out += [f"          · {line}" for line in f["evidence"]]
             out += [f"          → {line}" for line in f["guidance"]]
+    skipped = report.get("not_applicable") or []
+    if skipped:
+        out += ["", "── NOT APPLICABLE HERE " + "─" * 41]
+        out += [f"          {item['title']} — only on {item['applies_to']}" for item in skipped]
     out += ["", "No changes were made to the system. Nothing was uploaded."]
     return "\n".join(out) + "\n"
 
@@ -158,6 +174,9 @@ def format_summary(report: dict) -> str:
                    f"{f['summary']}")
     if not problems:
         out.append("All checks passed.")
+    skipped = report.get("not_applicable") or []
+    if skipped:
+        out.append(f"{len(skipped)} check(s) do not apply to this system and were not run.")
     return "\n".join(out) + "\n"
 
 

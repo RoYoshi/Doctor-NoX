@@ -1,43 +1,101 @@
-"""SELinux, failed systemd units and root-owned update-state permissions."""
+"""Mandatory access control (SELinux or AppArmor), firewall and failed systemd units."""
 from __future__ import annotations
 
-import os
-import stat
+import re
 
-from ..model import ERROR, INFO, PASS, UNKNOWN, WARN
+from ..distro import SYSTEMD
+from ..model import INFO, PASS, UNKNOWN, WARN
 from . import finding, probe
+from .updates import unit_show
 
 CAT = "security"
+#: Families whose installers turn a mandatory access control system on by default.
+MAC_DEFAULT = {"fedora": "SELinux", "debian": "AppArmor", "suse": "AppArmor or SELinux"}
 
 
-@probe("security.selinux", CAT, "SELinux")
-def selinux(ctx):
-    ev = []
-    mode = ""
+def _selinux_mode(ctx, ev):
+    """'enforcing' | 'permissive' | 'disabled' | '' (not readable)."""
     if ctx.exists("/sys/fs/selinux/enforce"):
         raw = (ctx.try_text("/sys/fs/selinux/enforce", 16) or "").strip()
         ev.append(f"/sys/fs/selinux/enforce: {raw or 'unreadable'}")
         mode = {"1": "enforcing", "0": "permissive"}.get(raw, "")
-    if not mode:
+        if mode:
+            return mode
+    if ctx.exists("/sys/fs/selinux") or ctx.exists("/usr/sbin/getenforce") or ctx.exists("/usr/bin/getenforce"):
         res = ctx.runner.run("getenforce")
         ev.append(res.describe())
-        if res.ok:
-            mode = res.stdout.strip().lower()
-        if not ctx.exists("/sys/fs/selinux"):
-            ev.append("/sys/fs/selinux: absent")
-    if mode == "enforcing":
-        return finding("security.selinux", CAT, "SELinux", PASS, "Enforcing", evidence=ev)
-    if mode == "permissive":
-        return finding("security.selinux", CAT, "SELinux", WARN, "Permissive: denials are logged, not enforced",
-                       evidence=ev, guidance=["Fedora ships enforcing. Check `/etc/selinux/config` and the "
-                                              "kernel command line (`enforcing=0`) for an override."])
-    if mode == "disabled":
-        return finding("security.selinux", CAT, "SELinux", ERROR, "SELinux is disabled", evidence=ev,
-                       guidance=["Fedora's confinement of services is off. Check `/etc/selinux/config` and "
-                                 "the kernel command line (`selinux=0`)."])
-    # No selinuxfs and no getenforce answer is not proof of "disabled" (e.g. containers): don't guess.
-    return finding("security.selinux", CAT, "SELinux", UNKNOWN, "SELinux state could not be read",
-                   evidence=ev, reason="Neither /sys/fs/selinux/enforce nor getenforce gave a recognized state.")
+        if res.ok and res.stdout.strip().lower() in ("enforcing", "permissive", "disabled"):
+            return res.stdout.strip().lower()
+    return ""
+
+
+@probe("security.mac", CAT, "SELinux / AppArmor")
+def mac(ctx):
+    title = "SELinux / AppArmor"
+    family = ctx.platform.family
+    lsm_text = ctx.try_text("/sys/kernel/security/lsm", 4096)
+    lsm = [w for w in (lsm_text or "").strip().split(",") if w]
+    ev = [f"active security modules: {', '.join(lsm)}" if lsm_text is not None
+          else "/sys/kernel/security/lsm: unreadable"]
+    cmdline = ctx.try_text("/proc/cmdline", 16 * 1024) or ""
+    overrides = re.findall(r"(?:^|\s)((?:selinux|enforcing|apparmor|security|lsm)=\S+)", cmdline)
+    if overrides:
+        ev.append(f"kernel command line: {' '.join(overrides)}")
+    selinux = _selinux_mode(ctx, ev)
+    apparmor = (ctx.try_text("/sys/module/apparmor/parameters/enabled", 16) or "").strip()
+    if apparmor:
+        ev.append(f"/sys/module/apparmor/parameters/enabled: {apparmor}")
+    apparmor_on = apparmor == "Y" and (lsm_text is None or "apparmor" in lsm)
+
+    if selinux == "enforcing":
+        return finding("security.mac", CAT, title, PASS, "SELinux is enforcing", evidence=ev)
+    if selinux == "permissive":
+        return finding("security.mac", CAT, title, WARN, "SELinux is permissive: it logs denials but blocks nothing",
+                       evidence=ev, guidance=["Look for `SELINUX=permissive` in /etc/selinux/config and "
+                                              "`enforcing=0` on the kernel command line.",
+                                              "Permissive mode is a troubleshooting setting; services run "
+                                              "unconfined while it is on."])
+    if apparmor_on:
+        return finding("security.mac", CAT, title, PASS, "AppArmor is enabled", evidence=ev)
+    if lsm_text is None and not selinux and not apparmor:
+        return finding("security.mac", CAT, title, UNKNOWN, "The security module state could not be read",
+                       evidence=ev, reason="/sys/kernel/security is not readable here (common in containers).")
+    if family in MAC_DEFAULT:
+        what = "SELinux is disabled" if family == "fedora" else "Neither AppArmor nor SELinux is active"
+        return finding("security.mac", CAT, title, WARN, what, evidence=ev,
+                       guidance=[f"This distribution family turns on {MAC_DEFAULT[family]} by default, so "
+                                 "someone switched it off. Services then run without that confinement.",
+                                 "Check /etc/selinux/config, the AppArmor service and the kernel command line "
+                                 "(`selinux=0`, `apparmor=0`)."])
+    return finding("security.mac", CAT, title, INFO, "No mandatory access control is active", evidence=ev,
+                   guidance=["This distribution does not turn on AppArmor or SELinux by default, so this is "
+                             "its normal state, not a fault."])
+
+
+@probe("security.firewall", CAT, "Firewall", applies=SYSTEMD)
+def firewall(ctx):
+    title = "Firewall"
+    ev = []
+    props, res = unit_show(ctx, "firewalld.service")
+    firewalld = props.get("ActiveState", "")
+    ev.append(f"firewalld.service: {firewalld or res.describe()}"
+              + (f" ({props.get('LoadState')})" if props.get("LoadState") == "not-found" else ""))
+    ufw_conf = ctx.try_text("/etc/ufw/ufw.conf", 16 * 1024)
+    ufw_on = bool(ufw_conf and re.search(r"^\s*ENABLED\s*=\s*yes\s*$", ufw_conf, re.M | re.I))
+    ev.append("ufw: " + ("not installed" if ufw_conf is None else "enabled" if ufw_on else "installed, disabled"))
+    if firewalld == "active":
+        return finding("security.firewall", CAT, title, PASS, "firewalld is running", evidence=ev)
+    if ufw_on:
+        return finding("security.firewall", CAT, title, PASS, "ufw is enabled", evidence=ev)
+    if not firewalld and ufw_conf is None:
+        return finding("security.firewall", CAT, title, UNKNOWN, "Firewall state could not be read", evidence=ev,
+                       reason=res.describe())
+    return finding("security.firewall", CAT, title, INFO, "No firewalld or ufw firewall is on", evidence=ev,
+                   guidance=["A desktop that offers no network services is not exposed by this alone. If you "
+                             "share files, run servers or use public networks, turn on your distribution's "
+                             "firewall (firewalld or ufw).",
+                             "Rules set directly with nftables or iptables need root to read, so Doctor cannot "
+                             "see them."])
 
 
 def _failed(ctx, user):
@@ -54,7 +112,7 @@ def _failed(ctx, user):
     return units, res
 
 
-@probe("security.failed_units", CAT, "Failed services")
+@probe("security.failed_units", CAT, "Failed services", applies=SYSTEMD)
 def failed_units(ctx):
     system, res_s = _failed(ctx, user=False)
     user, res_u = _failed(ctx, user=True)
@@ -73,49 +131,10 @@ def failed_units(ctx):
         return finding("security.failed_units", CAT, "Failed services", PASS,
                        "No failed systemd units" + ("" if user is not None else " (system scope)"), evidence=ev)
     names = [u for u, _ in system] + [u for u, _ in (user or [])]
-    ours = [u for u in names if u.startswith("fe-xico")]
+    first_is_user = bool(user) and names[0] in [u for u, _ in user]
     return finding("security.failed_units", CAT, "Failed services", WARN,
                    f"{count} failed unit(s): " + ", ".join(names[:3]) + ("…" if count > 3 else ""),
                    evidence=ev,
-                   guidance=[f"Inspect: `systemctl status {names[0]}` and `journalctl -b -u {names[0]}`"
-                             + (" (add --user for user units)" if user and names[0] in [u for u, _ in user] else ""),
-                             "Doctor never restarts or resets units."] +
-                            ([f"FE-XicoOS units affected: {', '.join(ours)}"] if ours else []))
-
-
-STATE_DIRS = ("/var/lib/fe-xicoos-auto-updates", "/run/fe-xicoos-updater", "/etc/fe-xico-updater")
-
-
-@probe("security.state_permissions", CAT, "Update state permissions")
-def state_permissions(ctx):
-    """Root services trust these directories; a user-writable one would be a privilege problem."""
-    ev, bad = [], []
-    for path in STATE_DIRS:
-        try:
-            info = os.lstat(ctx.path(path))
-        except FileNotFoundError:
-            ev.append(f"{path}: absent")
-            continue
-        except OSError as exc:
-            ev.append(f"{path}: unreadable ({exc.strerror})")
-            continue
-        mode = stat.S_IMODE(info.st_mode)
-        line = f"{path}: uid={info.st_uid} mode={mode:04o}"
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            bad.append(path)
-            line += " (not a plain directory)"
-        elif info.st_uid != ctx.trusted_uid or mode & 0o022:
-            bad.append(path)
-            line += " (writable by non-root)"
-        ev.append(line)
-    if bad:
-        return finding("security.state_permissions", CAT, "Update state permissions", WARN,
-                       f"Unsafe ownership/permissions on {bad[0]}", evidence=ev,
-                       guidance=["FE-XicoOS update services refuse to use state directories that "
-                                 "non-root users can write. Expected: root-owned, mode 0755.",
-                                 "Correct by hand only after confirming why it changed. Doctor changes nothing."])
-    if all(line.endswith("absent") for line in ev):
-        return finding("security.state_permissions", CAT, "Update state permissions", INFO,
-                       "No update state directories yet", evidence=ev)
-    return finding("security.state_permissions", CAT, "Update state permissions", PASS,
-                   "Update state directories are root-owned and not writable by others", evidence=ev)
+                   guidance=[f"Inspect: `systemctl{' --user' if first_is_user else ''} status {names[0]}` and "
+                             f"`journalctl -b {'--user-unit' if first_is_user else '-u'} {names[0]}`.",
+                             "Doctor never restarts or resets units."])

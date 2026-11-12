@@ -3,7 +3,8 @@
 Doctor NoX is released as signed `noarch` RPMs, one per supported Fedora
 release (currently 45 and 44, built from the same commit). FE-XicoOS installs a
 specific, reviewed release; it never builds Doctor from this repository's
-`main` branch.
+`main` branch. The other formats are built and tested on every commit but not
+yet released: see [Other formats](#other-formats).
 
 ## Versioning
 
@@ -13,9 +14,10 @@ specific, reviewed release; it never builds Doctor from this repository's
     schema (`doctor-nox/report`, `schema_version`).
   - **MINOR:** new checks or features.
   - **PATCH:** fixes.
-- The version is kept in three places, which `packaging/build-rpm.sh` checks
-  agree: `VERSION`, `Version:` in `packaging/doctor-nox.spec`, and
-  `VERSION` in `doctor_nox/__init__.py`.
+- The version is kept in `VERSION`, `Version:` in `packaging/doctor-nox.spec`,
+  `VERSION` in `doctor_nox/__init__.py` (which `pyproject.toml` reads),
+  `packaging/debian/changelog` and `pkgver` in `packaging/arch/PKGBUILD`. Each
+  build script checks that its own file agrees with `VERSION`.
 - The RPM `Release:` restarts at `1` for each version. Raise it only for
   packaging-only fixes.
 - A release is tagged `vX.Y.Z` on the exact commit it was built from.
@@ -57,8 +59,9 @@ or commits. Only the **public** key is committed.
 ## Making a release
 
 1. Bump the version in `VERSION`, the spec (`Version:` and a `%changelog`
-   entry) and `doctor_nox/__init__.py`, and merge the pull request once CI
-   is green.
+   entry), `doctor_nox/__init__.py`, `packaging/debian/changelog`,
+   `packaging/arch/PKGBUILD` and the `<releases>` list in
+   `data/io.github.royoshi.doctornox.metainfo.xml`, and merge once CI is green.
 2. Start **Actions → Release → Run workflow** on `main` with the version.
    After you approve the `doctor-release` environment, the workflow:
    - checks the version, that the tag is new, and that the secret key is
@@ -101,3 +104,26 @@ Before installing, the image build checks:
 
 It fails if any check fails; it never skips Doctor. Updating Doctor in
 FE-XicoOS is a normal pull request that replaces those files.
+
+## Other formats
+
+Every commit's CI builds and tests these (see `.github/workflows/ci.yml`) and
+keeps them as workflow artifacts. The release workflow does not publish them
+yet; each one needs a decision and an account that belong to the owner.
+
+| Format | Built by | Still needed before it is released |
+|---|---|---|
+| openSUSE RPM | `packaging/build-rpm.sh` on Tumbleweed | signing in the release workflow, or an openSUSE Build Service project |
+| .deb (Debian 13, Ubuntu 24.04+) | `packaging/build-deb.sh` | attaching to releases, or a signed APT repository / Launchpad PPA |
+| Arch package and AUR | `packaging/build-arch.sh` with `packaging/arch/PKGBUILD` | an AUR account and SSH key; at release time `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`, then push to `aur.archlinux.org/doctor-nox.git` |
+| Python sdist and wheel (pip, pipx) | `python3 -m build` | a PyPI project with a trusted publisher for this repository's release workflow |
+| Flatpak | not yet | see below |
+
+**Flatpak.** A sandboxed Doctor would not see most of what it checks: the
+host's `/var` and `/run` (package databases, restart flags, journal files),
+its mount table and its processes. It would need the
+`org.freedesktop.Flatpak` permission to run host commands, which Flathub
+reviews closely, and every file-based check would have to report "not
+visible from the sandbox" rather than a false pass. That is a design decision
+to make before any manifest is written.
+

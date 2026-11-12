@@ -9,7 +9,7 @@ from typing import Any
 from . import VERSION
 
 SCHEMA_ID = "doctor-nox/report"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Ordered from most to least urgent. Every severity is shown as text, never colour alone.
 PASS, INFO, WARN, ERROR, UNKNOWN = "pass", "info", "warn", "error", "unknown"
@@ -17,19 +17,19 @@ SEVERITIES = (ERROR, WARN, UNKNOWN, INFO, PASS)
 SEVERITY_LABEL = {PASS: "PASS", INFO: "INFO", WARN: "WARN", ERROR: "ERROR", UNKNOWN: "UNKNOWN"}
 SEVERITY_MEANING = {
     PASS: "Verified healthy.",
-    INFO: "Verified; worth knowing, not a fault (for example manual-update mode).",
+    INFO: "Verified; worth knowing, not a fault (for example automatic updates being off).",
     WARN: "Verified condition that may need attention.",
     ERROR: "Verified fault that is likely to break functionality or safety.",
     UNKNOWN: "Could not be verified (missing tool, permission, unsupported format). Not a pass.",
 }
 
 CATEGORIES = (
-    ("system", "System & bootc"),
-    ("updates", "Updates"),
+    ("system", "System"),
+    ("updates", "Updates & Packages"),
     ("security", "Security & Services"),
     ("hardware", "Hardware & Gaming"),
     ("storage", "Storage"),
-    ("software", "Apps & Flatpaks"),
+    ("software", "Apps"),
     ("network", "Network"),
     ("logs", "Logs"),
 )
@@ -44,7 +44,7 @@ MAX_LINE = 400
 class Finding:
     """One verified (or explicitly unverifiable) observation.
 
-    id        stable dotted identifier, e.g. "system.bootc.rollback"
+    id        stable dotted identifier, e.g. "system.image.rollback"
     category  key from CATEGORIES
     title     short noun phrase
     severity  one of SEVERITIES
@@ -108,8 +108,14 @@ def overall(findings: list[Finding]) -> str:
     return PASS if findings else UNKNOWN
 
 
-def build_report(findings: list[Finding], host: dict[str, str], *, started: datetime.datetime,
-                 finished: datetime.datetime, complete: bool, redacted: bool = False) -> dict[str, Any]:
+HOST_TEXT = ("name", "id", "version", "family", "image", "kernel", "init", "security")
+
+
+def build_report(findings: list[Finding], host: dict[str, Any], *, started: datetime.datetime,
+                 finished: datetime.datetime, complete: bool, redacted: bool = False,
+                 not_applicable: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    host_doc: dict[str, Any] = {k: str(host.get(k, "") or "") for k in HOST_TEXT}
+    host_doc["package_managers"] = [str(x) for x in host.get("package_managers", ())]
     return {
         "schema": SCHEMA_ID,
         "schema_version": SCHEMA_VERSION,
@@ -118,10 +124,11 @@ def build_report(findings: list[Finding], host: dict[str, str], *, started: date
         "duration_ms": max(0, int((finished - started).total_seconds() * 1000)),
         "complete": complete,
         "redacted": redacted,
-        "host": {k: str(host.get(k, "")) for k in ("name", "edition", "version", "kernel", "image_variant")},
+        "host": host_doc,
         "overall": overall(findings),
         "totals": totals(findings),
         "findings": [f.to_dict() for f in findings],
+        "not_applicable": [dict(item) for item in (not_applicable or [])],
     }
 
 
@@ -130,7 +137,7 @@ def validate_report(report: dict[str, Any]) -> list[str]:
     problems = []
     expect = {"schema": str, "schema_version": int, "doctor_version": str, "generated_at": str,
               "duration_ms": int, "complete": bool, "redacted": bool, "host": dict,
-              "overall": str, "totals": dict, "findings": list}
+              "overall": str, "totals": dict, "findings": list, "not_applicable": list}
     for key, kind in expect.items():
         if not isinstance(report.get(key), kind):
             problems.append(f"{key}: expected {kind.__name__}")
@@ -150,4 +157,7 @@ def validate_report(report: dict[str, Any]) -> list[str]:
         if finding.id in seen:
             problems.append(f"findings[{i}]: duplicate id {finding.id}")
         seen.add(finding.id)
+    for i, item in enumerate(report["not_applicable"]):
+        if not isinstance(item, dict) or set(item) != {"id", "category", "title", "applies_to"}:
+            problems.append(f"not_applicable[{i}]: expected id, category, title and applies_to")
     return problems

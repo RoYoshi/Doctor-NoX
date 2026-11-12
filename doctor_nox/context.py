@@ -36,6 +36,8 @@ class Context:
     cancel: threading.Event = field(default_factory=threading.Event)
     #: Owner required for root-controlled state files. Only fixture tests change it.
     trusted_uid: int = 0
+    _platform: Any = field(default=None, repr=False, compare=False)
+    _platform_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self):
         if self.runner is None:
@@ -49,6 +51,15 @@ class Context:
             except (KeyError, ImportError):
                 self.user = self.user or self.env.get("USER", "")
                 self.home = self.home or self.env.get("HOME", "")
+
+    @property
+    def platform(self):
+        """The distribution this scan looks at (see distro.py); worked out once per scan."""
+        with self._platform_lock:
+            if self._platform is None:
+                from .distro import detect
+                self._platform = detect(self)
+            return self._platform
 
     # ── filesystem ───────────────────────────────────────────────────────────
     def path(self, absolute: str) -> Path:
@@ -76,6 +87,26 @@ class Context:
             return self.read_text(absolute, limit)
         except (OSError, FileProblem):
             return None
+
+    def tail_text(self, absolute: str, limit: int = 2 * 1024 * 1024) -> str | None:
+        """The last `limit` bytes of a regular file (whole lines only), or None.
+
+        For logs that grow for years, such as pacman.log, where only recent lines matter.
+        """
+        p = self.path(absolute)
+        try:
+            info = p.stat()
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            with p.open("rb") as stream:
+                start = max(0, info.st_size - limit)
+                stream.seek(start)
+                data = stream.read(limit)
+        except OSError:
+            return None
+        if start:
+            data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+        return data.decode("utf-8", "replace").replace("\x00", "")
 
     def trusted_file(self, absolute: str, limit: int = 256 * 1024) -> tuple[str | None, str]:
         """Read a root-controlled file: regular, not a symlink, root-owned, not group/other writable.

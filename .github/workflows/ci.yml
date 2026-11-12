@@ -1,7 +1,14 @@
-# Doctor NoX CI: source tests, RPM build, package inspection, and an
-# install with Fedora's RPM signature enforcement left on. The package is
-# signed here with a throwaway key created in this job; that key is never
-# published and its packages are never released. Releases: release.yml.
+# Doctor NoX CI, one job per supported family: source tests (including the
+# GUI tests where the distribution packages PySide6), a native package build,
+# package inspection, and an install tested as an unprivileged user.
+#   Fedora      RPM, installed with RPM signature enforcement left on. The
+#               package is signed with a throwaway key created in the job;
+#               that key is never published and its packages never released.
+#   openSUSE    the same RPM spec, built and installed on Tumbleweed
+#   Debian      .deb on Debian 13, Ubuntu 26.04 LTS and Ubuntu 24.04 LTS
+#   Arch        makepkg with packaging/arch/PKGBUILD (also the AUR recipe)
+#   Python      sdist and wheel; pipx install, with and without the GUI extra
+# Nothing here publishes anything. Releases: release.yml.
 name: CI
 on:
   pull_request:
@@ -86,5 +93,194 @@ jobs:
         if: always()
         with:
           name: doctor-nox-ci-fedora-${{ matrix.fedora }}
+          path: dist/
+          if-no-files-found: ignore
+
+  opensuse:
+    name: openSUSE Tumbleweed
+    runs-on: ubuntu-24.04
+    container: registry.opensuse.org/opensuse/tumbleweed:latest
+    timeout-minutes: 40
+    steps:
+      - name: Bootstrap Git
+        timeout-minutes: 5
+        run: zypper --non-interactive install --no-recommends git-core tar gzip
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        timeout-minutes: 15
+        run: |
+          zypper --non-interactive install --no-recommends python3 rpm-build python-rpm-macros desktop-file-utils \
+            dejavu-fonts util-linux shadow procps findutils
+          # openSUSE names Python modules by interpreter flavour (python313-pyside6).
+          py="$(python3 -c 'import sys; print(f"python{sys.version_info[0]}{sys.version_info[1]}")')"
+          zypper --non-interactive install --no-recommends "$py-pyside6" "$py-jsonschema"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          printf '::notice title=Versions (openSUSE Tumbleweed)::%s; %s; %s\n' \
+            "$(python3 --version)" "$(rpm -q "$py-pyside6")" "$(rpm --version)"
+      - name: Source tests (including the PySide6 GUI tests)
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Build source tarball, SRPM and noarch RPM
+        run: packaging/build-rpm.sh
+      - name: Inspect the package
+        run: |
+          rpm=$(ls dist/doctor-nox-*.noarch.rpm)
+          echo "## Files"; rpm -qpl "$rpm"
+          echo "## Requires"; rpm -qpR "$rpm"
+          python3 -I packaging/ci/check-package.py "$rpm"
+      - name: Install and test as an unprivileged user
+        run: |
+          zypper --non-interactive install --allow-unsigned-rpm dist/doctor-nox-*.noarch.rpm
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" rpm
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-ci-opensuse-tumbleweed
+          path: dist/
+          if-no-files-found: ignore
+
+  debian:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: Debian 13, image: "debian:trixie", slug: debian-13, gui: true}
+          - {name: Ubuntu 26.04 LTS, image: "ubuntu:26.04", slug: ubuntu-26.04, gui: true}
+          # Ubuntu packages PySide6 from 25.04 on: here only the command line is tested.
+          - {name: Ubuntu 24.04 LTS (command line), image: "ubuntu:24.04", slug: ubuntu-24.04, gui: false}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Bootstrap Git
+        timeout-minutes: 5
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        timeout-minutes: 15
+        run: |
+          apt-get install -y --no-install-recommends dpkg-dev debhelper dh-python pybuild-plugin-pyproject \
+            python3-all python3-hatchling python3-jsonschema desktop-file-utils appstream hicolor-icon-theme \
+            fonts-dejavu-core procps util-linux passwd
+          if [ "${{ matrix.gui }}" = true ]; then
+            # qt6-qpa-plugins holds the offscreen platform the GUI tests use.
+            apt-get install -y --no-install-recommends python3-pyside6.qtwidgets qt6-qpa-plugins
+          fi
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          printf '::notice title=Versions (%s)::%s; dpkg %s\n' "${{ matrix.name }}" "$(python3 --version)" \
+            "$(dpkg-query -W -f '${Version}' dpkg)"
+      - name: AppStream metadata
+        run: appstreamcli validate --no-net --explain data/io.github.royoshi.doctornox.metainfo.xml
+      - name: Source tests (including the PySide6 GUI tests where installed)
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Build the .deb
+        run: packaging/build-deb.sh
+      - name: Inspect the package
+        run: |
+          deb=$(ls dist/doctor-nox_*_all.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          printf '::notice title=Package::%s, %s bytes, sha256 %s\n' "$(basename "$deb")" "$(stat -c %s "$deb")" \
+            "$(sha256sum "$deb" | cut -d' ' -f1)"
+      - name: Install and test as an unprivileged user
+        run: |
+          apt-get install -y --no-install-recommends ./dist/doctor-nox_*_all.deb
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" deb
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-ci-${{ matrix.slug }}
+          path: dist/
+          if-no-files-found: ignore
+
+  arch:
+    name: Arch Linux
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 40
+    steps:
+      - name: Bootstrap Git
+        timeout-minutes: 10
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        timeout-minutes: 15
+        run: |
+          pacman -S --noconfirm --needed base-devel python python-build python-installer python-hatchling \
+            python-jsonschema pyside6 ttf-dejavu desktop-file-utils hicolor-icon-theme
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd -m builder
+          printf '::notice title=Versions (Arch)::%s; %s; %s\n' "$(python3 --version)" "$(pacman -Q pyside6)" \
+            "$(pacman -Q pacman)"
+      - name: Source tests (including the PySide6 GUI tests)
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+      - name: Build the package with makepkg (as a normal user)
+        run: |
+          chown -R builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- env HOME=/home/builder bash -c \
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE" && packaging/build-arch.sh'
+      - name: Inspect the package
+        run: |
+          pkg=$(ls dist/doctor-nox-*-any.pkg.tar.*)
+          pacman -Qip "$pkg"
+          pacman -Qlp "$pkg"
+      - name: Install and test as an unprivileged user
+        run: |
+          pacman -U --noconfirm dist/doctor-nox-*-any.pkg.tar.*
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" arch
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-ci-arch
+          path: dist/
+          if-no-files-found: ignore
+
+  python:
+    name: Python package (pip, pipx)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the sdist and wheel
+        run: |
+          python3 -m pip install --user --break-system-packages build twine jsonschema
+          python3 -m build
+          python3 -m twine check --strict dist/*
+          python3 packaging/ci/check-wheel.py dist/*.whl
+      - name: The sdist builds the same wheel
+        run: |
+          mkdir sdist && tar -xzf dist/doctor_nox-*.tar.gz -C sdist
+          (cd sdist/doctor_nox-* && python3 -m build --wheel --outdir ../wheel)
+          diff <(unzip -Z1 dist/*.whl | sort) <(unzip -Z1 sdist/wheel/*.whl | sort)
+          (cd sdist/doctor_nox-* && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests)
+      - name: pipx install (command line)
+        run: |
+          pipx install dist/doctor_nox-*.whl
+          doctor-nox --version
+          doctor-nox --list-checks
+          set +e; doctor-nox --json > report.json; rc=$?; set -e
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || { echo "::error title=pipx::doctor-nox --json exited $rc"; exit 1; }
+          python3 -I - report.json data/doctor-nox-report.schema.json <<'PY'
+          import json, sys
+          import jsonschema
+          report, schema = (json.load(open(p)) for p in sys.argv[1:3])
+          jsonschema.validate(report, schema)
+          print(f"::notice title=pipx::{len(report['findings'])} findings, {len(report['not_applicable'])} not applicable; "
+                f"the report validates against schema v{report['schema_version']}")
+          PY
+      - name: pipx install with the GUI extra (PySide6 from PyPI)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 \
+            fonts-dejavu-core
+          pipx install --force "$(ls dist/doctor_nox-*.whl)[gui]"
+          QT_QPA_PLATFORM=offscreen doctor-nox --gui-smoke-test
+          QT_QPA_PLATFORM=offscreen doctor-nox --gui-self-test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-ci-python
           path: dist/
           if-no-files-found: ignore

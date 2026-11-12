@@ -1,33 +1,58 @@
 # Doctor NoX · v1.0
 
-Doctor NoX is FE-XicoOS's native, **read-only** system-health
-application. It is developed, tested and released in this repository and
-installed in FE-XicoOS as the signed `doctor-nox` RPM (see
-[RELEASING.md](RELEASING.md)). It is separate from FE-Xico Updater: it never invokes the
-updater's services, never touches its transaction lock, and never changes
-bootc deployments, timers, packages, drivers or files outside a report you
-explicitly save.
+Doctor NoX is a **read-only** health checker for Linux. It never changes
+packages, deployments, services, drivers or files outside a report you
+explicitly save, never needs root and never makes network requests.
 
 ## Launch
 
 | How | Command |
 |---|---|
-| Plasma menu | **Doctor NoX** (System) |
-| Foot, window | `doctor-nox` |
+| App menu | **Doctor NoX** (System) |
+| Window | `doctor-nox` |
 | Full text report | `doctor-nox --text` |
 | Redacted sharing report | `doctor-nox --text --redact` (or `--json --redact`) |
 | Problems only | `doctor-nox --summary` |
-| JSON (schema v2) | `doctor-nox --json` |
-| One area / one check | `doctor-nox --only hardware --only system.bootc` |
-| List check IDs | `doctor-nox --list-checks` |
+| JSON (schema v3) | `doctor-nox --json` |
+| One area / one check | `doctor-nox --only hardware --only system.image` |
+| List checks, and which apply here | `doctor-nox --list-checks` |
+| From a source checkout | `python3 -m doctor_nox …` or `bin/doctor-nox …` |
 
 CLI exit status: **0** no ERROR finding · **1** at least one ERROR · **2** usage
 error · **3** Doctor itself failed. WARN and UNKNOWN never change the status.
 `--deadline SECONDS` (5–300, default 60) bounds the whole scan.
 
+## Which Linux this is
+
+`doctor_nox/distro.py` works out, from `os-release` and the filesystem only
+(it runs no command):
+
+| Property | Values | From |
+|---|---|---|
+| family | `fedora`, `debian`, `arch`, `suse`, `other` | `ID`, then each word of `ID_LIKE` |
+| image | `ostree`, `steamos`, `transactional`, or none | `/run/ostree-booted`; `ID=steamos`; MicroOS-style IDs |
+| package tools | dnf, rpm, rpm-ostree, bootc, apt, dpkg, pacman, zypper, flatpak, snap, nix, apk, xbps, emerge | the program's file |
+| init | `systemd` or `other` | `/run/systemd/system` |
+| security module | `selinux`, `apparmor` or none | `/sys/kernel/security/lsm`, selinuxfs, AppArmor's module switch |
+
+Every check declares where it applies (a `Scope`). A check that does not apply
+is not run; the report lists it under `not_applicable`, with the kind of
+system it is for, and the window shows these under **Not applicable here**.
+
+| Scope | Checks |
+|---|---|
+| every Linux | identity, os-release, MAC, hardware, storage, network |
+| package-based and transactional-update systems | pending restart |
+| package-based Fedora, Debian, Arch and openSUSE | package database, last update |
+| Fedora, Debian, Arch and openSUSE families | config files to review |
+| those families and OSTree systems, not SteamOS | automatic updates |
+| image-based OSTree systems | image deployments |
+| systemd | firewall, failed services, boot journal |
+| Flatpak or Snap installed | Flatpak, Snap |
+
 ## The window
 
-- **Header:** the Doctor icon, the OS version · edition · kernel, and the
+- **Header:** the Doctor icon, the distribution · image type · kernel, and the
   overall state as a coloured pill with a plain-language headline:
   - **Problems found**: at least one Error;
   - **Needs attention**: at least one Warning;
@@ -35,8 +60,8 @@ error · **3** Doctor itself failed. WARN and UNKNOWN never change the status.
   - **Healthy**: otherwise.
 
   The time and duration of the last scan sit under the pill.
-- **Check groups (left):** Overview, System & bootc, Updates, Security &
-  Services, Hardware & Gaming, Storage, Apps & Flatpaks, Network, Logs.
+- **Check groups (left):** Overview, System, Updates & Packages, Security &
+  Services, Hardware & Gaming, Storage, Apps, Network, Logs.
   - A group with problems shows a pill with how many checks are Error, Warning
     or Unknown, coloured by the worst one.
   - A group where everything was verified shows a green **OK** pill.
@@ -50,7 +75,8 @@ error · **3** Doctor itself failed. WARN and UNKNOWN never change the status.
   - **What you can do**. Doctor never runs these steps itself.
 
   With no row selected, the pane shows the overview: the headline, counts,
-  every group's worst status and a legend of status levels.
+  every group's worst status, the checks that do not apply here, and a legend
+  of status levels.
 - **Filter:** free text across title, summary, evidence and guidance.
   - Also `is:problem`, `is:warn`, `is:error`, `is:unknown`, `is:pass`.
   - The status chips (Error, Warning, Unknown, Info, Pass, each with its count
@@ -116,145 +142,193 @@ dependency.
   - the focus accent at least 3:1.
 - **Shape:** neutral grey surfaces with 1 px borders, 6–8 px rounded corners,
   rounded status pills, and no animations.
-- **Fonts:** your desktop's UI font, so Doctor matches KDE (or
-  `DOCTOR_NOX_FONT` if that family is installed). Check IDs and evidence use
-  the desktop's fixed-width font.
+- **Fonts:** your desktop's UI font (or `DOCTOR_NOX_FONT` if that family is
+  installed). Check IDs and evidence use the desktop's fixed-width font.
 - **Native dialogs:** a matching `QPalette` is applied, so native dialogs and
   menus follow the theme.
 - **Icon:** `io.github.royoshi.doctornox` is RoYoshi's magenta medical badge
-  (white cross with a smile). It is Doctor's own identity and deliberately does
-  **not** use the FE-XicoOS top hat.
+  (white cross with a smile), until the new Doctor NoX icon is ready.
   - It ships as raster PNGs at 16–512 px in `hicolor`, downscaled from the
     pinned original `tools/doctor-nox-icon-source.png` by
     `python3 tools/build_doctor_icon.py`.
   - The art is never redrawn, and there is no SVG.
-  - If the icon is missing, the window draws a deterministic "FX" glyph. There
-    is never a generic or Tux fallback.
+  - If the icon is missing, the window draws a deterministic glyph. There is
+    never a generic or Tux fallback.
 
 ## Severity — what each level promises
 
 | Level | Meaning |
 |---|---|
 | **PASS** | Verified healthy. |
-| **INFO** | Verified and worth knowing, but not a fault. Examples: manual-update mode, Nouveau/NVK on the standard image, offline, first-boot Flatpaks pending. |
-| **WARN** | Verified condition that may need attention. |
-| **ERROR** | Verified fault likely to break functionality or safety. Examples: legacy auto-reboot timer enabled, read-only `/var`, no trusted updater config, < 2 GiB free. |
+| **INFO** | Verified and worth knowing, but not a fault. Examples: automatic updates off, a restart pending for less than a week, Nouveau/NVK in use, offline, no MAC on Arch. |
+| **WARN** | Verified condition that may need attention. Examples: kernel modules removed by an update, SELinux permissive, interrupted dpkg run, no update for 30 days. |
+| **ERROR** | Verified fault likely to break functionality or safety. Examples: unreadable package database, read-only `/var` or root filesystem, < 2 GiB free, < 80 MiB free on `/boot`. |
 | **UNKNOWN** | Could not be verified (missing tool, permission, unsupported format). It is **never** counted as PASS. The overall state is UNKNOWN if any check is UNKNOWN and none is WARN/ERROR. |
 
 There is deliberately no percentage "health score".
 
 ## Checks
 
-| ID | What it reads | Notes |
+| ID | Applies to | What it reads | Notes |
+|---|---|---|---|
+| `system.identity` | all | `os-release`, the platform above | INFO: distribution, family, image type, package tools, init, security module, kernel. |
+| `system.os_release` | all | `/etc/os-release` vs `/usr/lib/os-release` | A stale regular-file copy (OSTree's `/etc` merge keeps old files) → WARN. |
+| `system.image` → `system.image.{booted,source,pending,rollback,pinned,local_changes}` | OSTree | `bootc status --json --format-version=1`, else `rpm-ostree status --json` | See [image deployments](#image-deployments). |
+| `updates.reboot` | package-based, transactional | `/run/reboot-required(.pkgs)`, `/run/reboot-needed`, kernel module trees | See [pending restart](#pending-restart). |
+| `updates.packages` | package-based Fedora, Debian, Arch, openSUSE | `rpm -q rpm`, `dpkg --audit` + `/var/lib/dpkg/updates`, `pacman -Q pacman` + `db.lck` + `pacman -Qdtq`, `/run/zypp.pid` | See [package database](#package-database). |
+| `updates.config_files` | the four families | a bounded walk of `/etc` | `.rpmnew`/`.rpmsave`, `.dpkg-dist`/`.dpkg-old`/`.ucf-*`, `.pacnew`/`.pacsave` → INFO with the family's merge tool. |
+| `updates.last_update` | package-based, the four families | the end of `pacman.log`; `/var/lib/dpkg/status`; `rpm -qa --queryformat=%{INSTALLTIME}` | WARN after 30 days. On Arch only a full `pacman -Syu` counts. |
+| `updates.automatic` | the four families and OSTree, not SteamOS | `systemctl is-enabled` of known timers, `rpm-ostreed.conf`, `dnf/automatic.conf`, `apt.conf.d` | Always INFO. See [automatic updates](#automatic-updates). |
+| `security.mac` | all | `/sys/kernel/security/lsm`, selinuxfs, `getenforce`, AppArmor's `enabled`, `/proc/cmdline` | SELinux enforcing or AppArmor on → PASS; SELinux permissive → WARN; off where the family turns one on by default (Fedora, Debian, openSUSE) → WARN; off on Arch and others → INFO; nothing readable → UNKNOWN. |
+| `security.firewall` | systemd | `systemctl show firewalld.service`, `/etc/ufw/ufw.conf` | firewalld running or ufw enabled → PASS; neither → INFO. Rules set directly with nftables need root to read. |
+| `security.failed_units` | systemd | `systemctl list-units --state=failed` (system + user) | WARN with unit names and inspection commands. Doctor never restarts or resets units. |
+| `hardware.cpu_memory` | all | `/proc/cpuinfo`, `/proc/meminfo` | < 5 % available → WARN (point in time). |
+| `hardware.graphics` | all | `/sys/class/drm`, `lspci -nnk`, module trees | See [graphics](#graphics). |
+| `hardware.nvidia` | all (INFO without an NVIDIA GPU) | `/sys/module/nvidia/version`, `nvidia-smi` | `nvidia-smi` only runs when the module is loaded. Kernel/user-space version mismatch → WARN. Missing `nvidia-smi` names the family's package. |
+| `hardware.session` | all | `XDG_SESSION_TYPE` | Wayland PASS, X11 INFO. |
+| `hardware.audio` | all | `/proc/asound/cards`, PipeWire and PulseAudio sockets | Cards but no sound server → WARN. No cards → INFO. |
+| `hardware.controllers` | all | `/proc/bus/input/devices`, `/sys/bus/usb/devices`, `modules.dep`; on Fedora `rpm -q kernel-modules-extra-$(uname -r)` | See [controllers](#controllers). |
+| `hardware.sensors` | all | `/sys/class/hwmon` | WARN only at or above a sensor's own `crit` value. |
+| `storage.layout` / `storage.home` | all | `/proc/self/mountinfo` | See [storage](#storage). |
+| `storage.space` | all | `statvfs` | See [storage](#storage). |
+| `software.flatpak` | Flatpak installed | `flatpak remotes`, `flatpak list` (system + user), `XDG_DATA_DIRS` | Apps and remotes → PASS; no remotes and no apps → INFO; installed apps whose folder is missing from `XDG_DATA_DIRS` in a desktop session → WARN (they may not appear in menus). |
+| `software.snap` | Snap installed | `snap list`, `XDG_DATA_DIRS` | snapd not answering → WARN; a broken snap → WARN; `/var/lib/snapd/desktop` missing from `XDG_DATA_DIRS` → WARN. |
+| `network.link` / `.route` / `.dns` / `.manager` | all | `/sys/class/net`, `/proc/net/*`, `/etc/resolv.conf`, `nmcli -t general` | Local state only. Offline = INFO. No packets are sent and no connectivity check is triggered. Wi-Fi names are never read. DNS search domains are counted, not shown. |
+| `logs.boot` | systemd | `journalctl --boot=0 --priority=0..3 --output=json --lines=400` | See [logs](#logs). |
+
+### Image deployments
+
+Doctor asks `bootc status` first. bootc refuses users who are not root, so on
+most desktops the answer comes from `rpm-ostree status --json`, which any user
+may read. Both are read-only, and the evidence says which one answered.
+
+- **Booted:** the image reference and version, how old the image is; WARN if
+  bootc marks it incompatible or it has no update source.
+- **Update source:** bootc's configured image vs the booted one → WARN, or INFO
+  when the staged deployment already follows the new source.
+- **Next boot:** staged update → INFO ("applies at the next reboot"). A
+  **download-only** deployment is "will NOT be applied at reboot": Doctor never
+  claims a reboot applies it. A queued rollback (bootc's `rollbackQueued`, or
+  rpm-ostree listing the previous deployment first) is reported as such.
+- **Rollback and pinned:** a previous deployment → PASS; none → INFO. Pinned
+  deployments are counted across every slot.
+- **Local changes:** layered or removed packages, or an unlocked `/usr` → INFO,
+  because each update has to reapply them.
+- Neither tool answering → UNKNOWN, with `/run/ostree/staged-deployment` as
+  evidence.
+
+### Pending restart
+
+- Debian/Ubuntu `/run/reboot-required` (with the packages that asked, from
+  `.pkgs`) and openSUSE `/run/reboot-needed` → INFO, WARN after 7 days.
+- The running kernel's modules removed by an update → WARN: new USB devices,
+  filesystems or VPNs that need a module fail until a restart. This is the
+  signal on Arch, which removes the old kernel's modules.
+- A newer kernel of the **same flavour** installed → INFO. Flavours are kept
+  apart (`-generic` vs `-lowlatency`, Fedora's `+debug`), and on Arch a
+  different release is another kernel package (`linux`, `linux-lts`), not an
+  update, so it never counts.
+- Both `/usr/lib/modules` and `/lib/modules` are read (openSUSE Leap 15 has no
+  merged `/usr`). No kernels found → UNKNOWN (normal in containers and WSL).
+
+### Package database
+
+- **Fedora:** `rpm -q rpm` fails → ERROR (the database cannot be read).
+- **Debian/Ubuntu:** `dpkg --audit` output, or records left in
+  `/var/lib/dpkg/updates` by an interrupted run → WARN with
+  `dpkg --configure -a`.
+- **Arch:** `db.lck` with no `pacman` process running → WARN (a stale lock blocks
+  every package change); pacman running now → INFO; orphaned dependencies →
+  INFO; `pacman -Q pacman` fails → ERROR.
+- **openSUSE:** the RPM database as on Fedora; a zypper holding its lock right
+  now → INFO. A lock file naming a dead process is not reported: libzypp takes
+  such a lock over by itself.
+
+### Automatic updates
+
+Doctor reads these timers with `systemctl is-enabled` only:
+
+| Family | Timers | Also read |
 |---|---|---|
-| `system.identity` | `/usr/lib/os-release` | FE-XicoOS name, version, edition, kernel. |
-| `system.os_release` | `/etc/os-release` vs `/usr/lib/os-release` | A stale regular-file copy kept by the OSTree `/etc` merge → WARN (this was seen on FE-ROYO). |
-| `system.bootc` → `system.bootc.{booted,source,pending,rollback,pinned}` | `bootc status --json --format-version=1` | See [bootc sources](#bootc-sources) below. |
-| `updates.timers` → `updates.{auto_timer,legacy_timer,migration}` | `systemctl is-enabled` / `show` | Safe hourly timer on = PASS; off = INFO (manual mode). Legacy `bootc-fetch-apply-updates.timer`: masked or absent = PASS, merely disabled = WARN, enabled = ERROR (it reboots unattended). |
-| `updates.active_hours` | `/var/lib/fe-xicoos-auto-updates/settings.json` | Absent → worker default 09–23. Invalid or untrusted → WARN. |
-| `updates.results` → `updates.{auto_result,updater_result}` | `event.json`, `/run/fe-xicoos-updater/{status,check,upgrade,rollback}.json` | Root-owned, non-writable files only. A failed operation this boot → WARN. |
-| `updates.updater` | build marker, executable, `config.ini` | Mirrors the updater's own lookup: `/etc` → `/usr/local/etc` → `/usr/etc` → XDG dirs; the first root-owned, not group/world-writable file wins. See the note below. |
-| `updates.notifier` | `systemctl --user is-enabled` | UNKNOWN when there is no user session bus. |
-| `security.selinux` | `/sys/fs/selinux/enforce`, `getenforce` | Enforcing PASS, permissive WARN, disabled (as reported by getenforce) ERROR. No answer at all = UNKNOWN, not "disabled". |
-| `security.failed_units` | `systemctl list-units --state=failed` (system + user) | WARN with unit names and inspection commands. Doctor never restarts or resets units. |
-| `security.state_permissions` | update state directories | A non-root-writable state directory → WARN. |
-| `hardware.cpu_memory` | `/proc/cpuinfo`, `/proc/meminfo` | < 5 % available → WARN (point in time). |
-| `hardware.graphics` | `/sys/class/drm`, `lspci -nnk` | See [graphics](#graphics) below. |
-| `hardware.nvidia` | `/sys/module/nvidia/version`, `nvidia-smi` | `nvidia-smi` only runs when the nvidia module is loaded. A kernel/user-space version mismatch → WARN. |
-| `hardware.session` | `XDG_SESSION_TYPE` | Wayland PASS, X11 INFO. |
-| `hardware.audio` | `/proc/asound/cards`, PipeWire socket | Cards but no PipeWire → WARN. No cards → INFO. |
-| `hardware.controllers` | `/proc/bus/input/devices`, `/sys/bus/usb/devices`, `modules.dep`, `rpm -q kernel-modules-extra-$(uname -r)` | See [controllers](#controllers) below. |
-| `hardware.sensors` | `/sys/class/hwmon` | WARN only at or above a sensor's own `crit` value. |
-| `storage.layout` / `storage.home` | `/proc/self/mountinfo` | See [storage](#storage) below. |
-| `storage.space` | `statvfs` | See [storage](#storage) below. |
-| `software.flatpaks` | `flatpak list --system/--user`, provisioning marker, service state | See [Flatpaks](#flatpaks) below. |
-| `software.core_apps` | file presence, `rpm -q konsole-part` | Foot, Dolphin + F4 terminal (konsole-part), Steam, Doctor. Standalone Konsole present → INFO. |
-| `network.link` / `.route` / `.dns` / `.manager` | `/sys/class/net`, `/proc/net/*`, `/etc/resolv.conf`, `nmcli -t general` | Local state only. Offline = INFO. No packets are sent and no connectivity check is triggered. Wi-Fi names are never read. DNS search domains are counted, not shown. |
-| `logs.boot` | `journalctl --boot=0 --priority=0..3 --output=json --lines=400` | See [logs](#logs) below. |
-| `logs.update_units` | `journalctl --boot=0 --unit=<FE-XicoOS unit>` | Errors from FE-XicoOS update and Flatpak services. |
+| OSTree | `rpm-ostreed-automatic.timer`, `bootc-fetch-apply-updates.timer`, `uupd.timer`, `ublue-update.timer`, `fe-xicoos-auto-update.timer` | `AutomaticUpdatePolicy` in `/etc/rpm-ostreed.conf` (`none` means the timer does nothing) |
+| Fedora | `dnf-automatic.timer`, `dnf5-automatic.timer`, `dnf-automatic-install.timer` | `apply_updates` in `/etc/dnf/automatic.conf` |
+| Debian | `apt-daily-upgrade.timer` | unattended-upgrades installed, `APT::Periodic::Unattended-Upgrade` in `apt.conf.d` |
+| openSUSE | `transactional-update.timer` | |
+| Arch | none: Arch updates when you run `pacman -Syu` | |
 
-### bootc sources
-
-Doctor tries these in order and says which one it used:
-1. A live `bootc status` query.
-2. If non-root users are refused, FE-Xico Updater's **root-written** status
-   snapshot from this boot (`/run/fe-xicoos-updater/*.json`; only trusted files).
-3. Otherwise UNKNOWN, with OSTree runtime markers as evidence and a pointer to
-   Updater → Status.
-
-What it reports:
-- A **download-only** staged deployment is reported as "will NOT be applied at
-  reboot". Doctor never claims a reboot applies it.
-- A rollback queued via `rollbackQueued` / `bootOrder` is reported as such.
-- Pinned deployments are counted across booted, staged, rollback and
-  `otherDeployments`.
-- If the spec source differs from the booted image → WARN, or INFO when the
-  staged deployment already follows the new source.
-
-### Updater config permissions
-
-A `0777` `/etc/fe-xico-updater/config.ini` is **ignored by the updater**, which
-then falls back to the `/usr/etc` image default. Doctor shows this as WARN with
-the `chown`/`chmod` you could run. It never changes permissions, never
-executes, and never echoes the configured command values.
+The result is always INFO: on or off is a choice. `bootc-fetch-apply-updates`
+restarts the computer by itself, so the summary says so. Software centers
+(GNOME Software, KDE Discover) can update too; Doctor does not read their
+settings and says so.
 
 ### Graphics
 
 - NVIDIA Open is told apart from the proprietary module via
-  `/proc/driver/nvidia/version` or the module licence.
-- Nouveau (+ NVK) is INFO on the standard image and WARN only on the NVIDIA
-  Open image (detected by its `80-fe-xico-nvidia-open.conf` policy).
-- AMD amdgpu and Intel i915/xe = PASS. Virtual GPUs = INFO. No bound driver = WARN.
+  `/proc/driver/nvidia/version` or the module licence. Both → PASS.
+- Nouveau (+ NVK) → INFO: a valid choice. It becomes WARN when the NVIDIA
+  driver is installed for the running kernel but Nouveau claimed the GPU.
+- AMD amdgpu/radeon and Intel i915/xe = PASS. Virtual GPUs = INFO. No bound
+  driver = WARN.
 
 ### Controllers
 
 - xpad loaded, built in, or present for the **running** kernel → PASS.
 - xpad missing and no Xbox-protocol device → INFO (not a fault).
 - An Xbox-protocol USB interface (class ff/5d/01, ff/47/d0) with no bound
-  driver → WARN. The reason names `kernel-modules-extra-<running kernel>` when
-  that package is missing.
+  driver → WARN.
+- Where xpad comes from is said in the distribution's terms:
+  `kernel-modules-extra-<running kernel>` on Fedora (checked with `rpm -q`),
+  `linux-modules-extra-$(uname -r)` on Ubuntu, the image itself on image-based
+  systems.
 - Hyperkin (2e24) devices are listed but **not assumed** to need xpad; HID-mode
   pads work without it.
 
 ### Storage
 
-- `storage.layout` / `storage.home`:
-  - Read-only `/usr`, `/` and `/sysroot` are normal on bootc.
-  - A read-only `/var` or `/etc` → ERROR.
-  - A writable `/usr` → INFO (`bootc usr-overlay`).
-  - Home must resolve onto persistent writable storage (normally `/var/home`).
-- `storage.space`: the same filesystem is reported once.
-  - ERROR below 2 GiB.
-  - WARN below 5 % or 5 GiB, or below 10 GiB on the filesystem that holds deployments.
-
-### Flatpaks
-
-- Present system- or user-wide → PASS.
-- Missing before `default-flatpaks-v4.done` exists → INFO (first boot, or
-  installing now).
-- Provisioning service failed → WARN.
-- Missing after provisioning completed → INFO: probably removed on purpose,
-  and FE-XicoOS does not reinstall it.
+- `storage.layout`:
+  - `/var` or `/etc` read-only → ERROR everywhere.
+  - Package-based: a read-only root → ERROR (usually a remount after an
+    error); `/usr` mounted read-only on its own → WARN.
+  - OSTree: read-only `/` and `/usr` are normal; a writable `/usr` → INFO
+    (`bootc usr-overlay`, `rpm-ostree usroverlay`).
+  - SteamOS and transactional systems: a read-only system partition is
+    normal; a writable one → INFO (changes are lost at the next update).
+- `storage.home`: read-only → ERROR; in memory (tmpfs) → WARN; on OSTree,
+  not under `/var` or a separate mount → WARN.
+- `storage.space` checks `/` and `/var` (OSTree: `/sysroot` and `/var`; SteamOS:
+  `/var`, since its system partition is full by design), your home, and a
+  separate `/boot`. Each real filesystem is reported once: btrfs subvolumes
+  and OSTree's bind mounts share a device. Image layers (composefs, erofs,
+  squashfs) are skipped.
+  - ERROR below 2 GiB; WARN below 5 % of the disk, but never below 5 GiB
+    (10 GiB where OSTree deployments live) or above 20 GiB.
+  - Filesystems under 8 GiB: WARN below 10 %, ERROR below 3 %.
+  - `/boot`: WARN below 200 MiB, ERROR below 80 MiB (a kernel update needs
+    room).
+  - The guidance names the family's cleanup: `paccache`, `apt autoremove`,
+    `dnf autoremove`, snapper snapshots.
 
 ### Logs
 
 - Critical entries → WARN. Error-level only → INFO, since these are common and
   often harmless.
 - No journal files → UNKNOWN.
-- Without journal group access, Doctor says that only your own logs are visible
-  and reports UNKNOWN rather than a false PASS.
+- Without journal group access (`systemd-journal`, `adm` or `wheel`), Doctor
+  says that only your own logs are visible and reports UNKNOWN rather than a
+  false PASS.
 
 ## Safety boundaries (enforced in code and by tests)
 
-- **Read-only.** No sudo/pkexec/Polkit, no bootc upgrade/switch/rollback, no
-  rpm-ostree, no package installs, no module loads, no `systemctl
+- **Read-only.** No sudo/pkexec/Polkit, no package installs or removals, no
+  bootc or rpm-ostree transactions, no module loads, no `systemctl
   start/stop/enable/mask/daemon-reload/reset-failed`, no reboot, no chmod,
   no cleanup.
 - **Command allowlist with argument patterns.** `doctor_nox/runner.py`
   declares every executable *and* every permitted argument list. Unit names,
   rpm packages, kernel modules and modinfo fields come from fixed sets.
   Anything else raises before a process is created. A test fails if any
-  pattern contains a mutating verb.
+  pattern contains a mutating verb (`upgrade`, `-Syu`, `--configure`,
+  `refresh`, `rebase`, …).
 - **Bounded processes:**
   - no shell and no stdin;
   - minimal environment (no `LD_PRELOAD`, `PYTHONPATH` or tokens);
@@ -263,8 +337,10 @@ executes, and never echoes the configured command values.
   - at most 4 concurrent commands;
   - a 60-second scan deadline.
 - **Trusted inputs.** Executables must be root-owned, non-writable and under
-  `/usr`. Root-produced state files must be regular, non-symlink, root-owned
-  and not group/world-writable before they are believed.
+  `/usr`; Doctor runs the verified file but keeps the name it was found under,
+  so multi-call tools such as `modinfo` (a link to `kmod`) behave. Root-produced
+  state files must be regular, non-symlink, root-owned and not
+  group/world-writable before they are believed.
 - **Privacy.**
   - No network requests, telemetry or automatic exports.
   - Doctor never reads tokens, keyrings, SSH keys, shell history or private app data.
@@ -289,53 +365,74 @@ executes, and never echoes the configured command values.
 | image digests | shortened to `sha256:` + 12 characters |
 
 **Not redacted, on purpose:**
-- image references such as `ghcr.io/royoshi/fe-xicoos:latest`;
+- image references such as `ghcr.io/ublue-os/bazzite:stable`;
 - kernel version, package names and versions, unit names, interface names;
 - PCI/USB vendor:product IDs.
 
-The names `root`, `admin`, `user`, `localhost`, `fedora` and the default
-hostname `fe-xico` are not replaced, because they would mangle ordinary text.
+Names everyone shares are not replaced, because that would mangle ordinary
+text: `root`, `admin`, `user`, `localhost`, and distribution default host and
+user names such as `fedora`, `ubuntu`, `debian`, `archlinux`, `steamdeck` and
+`deck`.
 
 **Limits:** redaction is pattern-based. A secret in an unusual format, or a
 private name inside a log message, can slip through. That is why the sharing
 header asks you to review before posting.
 
+## Report schema v3
+
+`data/doctor-nox-report.schema.json` describes the JSON report
+(`schema: doctor-nox/report`, `schema_version: 3`). Compared with v2 (FE-Xico
+Doctor and the first Doctor NoX commit):
+
+- `host` has `name`, `id`, `version`, `family`, `image`, `kernel`, `init`,
+  `security` and `package_managers` (a list) instead of `edition` and
+  `image_variant`;
+- `not_applicable` lists each check left out, with `id`, `category`, `title`
+  and `applies_to`;
+- the bootc findings are now `system.image.*`, from bootc or rpm-ostree.
+
 ## Architecture
 
 ```
-/usr/bin/doctor-nox            CLI + GUI entry (python3 -I)
-/usr/share/doctor-nox/doctor_nox/
-  model.py      Finding, severities, categories, report schema v2, validator
+doctor_nox/
+  distro.py     which Linux this is; Scope rules for where each check applies
+  model.py      Finding, severities, categories, report schema v3, validator
   runner.py     allowlist (command + argument patterns), bounded execution
-  context.py    filesystem root, env, kernel, identity, trusted-file reads
+  context.py    filesystem root, env, kernel, identity, platform, trusted reads
   probes/       system, updates, security, hardware, storage, software, network, logs
-  engine.py     4 workers, isolation, progress, cancellation, deadline
+  engine.py     applicability, 4 workers, isolation, progress, cancellation, deadline
   report.py     text / JSON / redaction / atomic export
   viewmodel.py  Qt-free filtering, grouping, badges, detail HTML (unit-tested)
   theme.py      Qt-free light/dark palettes, status colours, WCAG contrast helper
   gui.py        PySide6 Qt Widgets window, stylesheet, status-pill delegates,
                 worker thread, self-test, synthetic-data screenshots
-/usr/share/doctor-nox/doctor-nox-report.schema.json
-/usr/share/applications/io.github.royoshi.doctornox.desktop
-/usr/share/icons/hicolor/<N>x<N>/apps/io.github.royoshi.doctornox.png
+  cli.py        the command line; also the `doctor-nox` entry point
 ```
 
-In this repository the same files live at `bin/`, `doctor_nox/`, `data/`
-and `data/icons/`; `packaging/doctor-nox.spec` installs them to the paths
-above.
+How it is installed:
 
-**Why PySide6 Qt Widgets (kept from v0.1), not Kirigami/QML:**
-- It is already integrated and uses Fedora's `python3-pyside6` RPM (no pip).
-- It gives native KDE theming hooks.
+| Format | Python package | Command |
+|---|---|---|
+| RPM (Fedora, openSUSE) | `/usr/share/doctor-nox/doctor_nox/`, with bytecode | `bin/doctor-nox` → `/usr/bin/doctor-nox` |
+| .deb, Arch, pip, pipx | the Python module directory (from the wheel) | the `doctor-nox` entry point |
+
+Every format installs `/usr/share/applications/io.github.royoshi.doctornox.desktop`,
+`/usr/share/metainfo/io.github.royoshi.doctornox.metainfo.xml`,
+`/usr/share/doctor-nox/doctor-nox-report.schema.json` and the hicolor icons
+(pip and pipx under their own prefix).
+
+**Why PySide6 Qt Widgets:**
+- Every supported family packages PySide6, and pip provides it elsewhere.
+- It gives native desktop theming hooks.
 - The logic is testable without a display through `viewmodel.py`.
-- A Kirigami rewrite would add QML modules and a second language without a
-  matching test benefit.
 
 **Adding a check:**
-1. Write `@probe("area.name", "<category>", "Title")` in the right
-   `probes/*.py`, returning `Finding`(s).
+1. Write `@probe("area.name", "<category>", "Title", applies=<Scope>)` in the
+   right `probes/*.py`, returning `Finding`(s). Pick the narrowest Scope from
+   `distro.py` (or add one with words that say where it applies).
 2. Add any new command to `runner.ALLOWED` with exact argument patterns.
-3. Add fixture tests to `tests/test_doctor_nox_probes.py`.
+3. Add fixture tests to `tests/test_doctor_nox_probes.py`, using
+   `install_distro()` for each family the check handles.
 
 ## Tests
 
@@ -346,10 +443,17 @@ QT_QPA_PLATFORM=offscreen bin/doctor-nox --gui-self-test   # needs PySide6
 ```
 
 What the tests cover:
+- **Platform detection:** os-release fixtures for Fedora, Silverblue, Bazzite,
+  FE-XicoOS, AlmaLinux, Ubuntu, Debian, Mint, Pop!_OS, Arch, CachyOS, SteamOS,
+  openSUSE Tumbleweed, Leap and Aeon, NixOS and Alpine.
 - **Probes:** run on synthetic filesystem roots through a fake runner that
-  enforces the real allowlist. Nothing executes bootc/systemctl/journalctl/flatpak.
+  enforces the real allowlist. Nothing executes rpm-ostree, systemctl,
+  journalctl, dpkg, pacman, rpm, flatpak or snap. Every check is also run on
+  every family with missing tools, timeouts and garbage output, and may never
+  claim ERROR without evidence.
 - **Runner:** tested against a temporary helper script (output cap, timeout,
-  cancel killing grandchildren, Unicode, minimal environment).
+  cancel killing grandchildren, Unicode, minimal environment, argv[0] for
+  multi-call tools).
 - **GUI self-test:** uses synthetic probes to load, filter, select, export,
   rescan, ignore a rapid refresh, cancel, and close while scanning.
   - It also switches to Light, Dark and Match system and renders the whole
@@ -359,65 +463,36 @@ What the tests cover:
 - **Themes:** WCAG contrast for every text/background pair in both palettes;
   no neon or OLED-black values; status colours distinct from each other and
   from the accent.
-- **Screenshots:** `doctor-nox --gui-screenshot DIR` (hidden QA flag)
-  renders the real window with **synthetic** results and runs no host probes.
-  - It saves `welcome`, `overview`, `details` and `narrow` PNGs, in both themes.
-  - FE-XicoOS's VM workflow runs it offscreen inside the built image and
-    uploads the PNGs as the `doctor-nox-screenshots` artifact.
-  - That step is informational and can never block validation or publishing.
-- **Package (`.github/workflows/ci.yml`, Fedora 45 and 44):** builds the RPM,
-  inspects its files and dependencies, installs it with Fedora's signature
-  enforcement on, and runs `--list-checks`, the CLI report modes,
-  `--gui-smoke-test` and `--gui-self-test` from the installed package as an
-  unprivileged user. It also compares the installed package's reports with
-  the source tree's.
-- **FE-XicoOS image build:** installs the pinned, signed RPM and runs
-  `--list-checks`, `--gui-smoke-test` and `--gui-self-test` offscreen. None of
-  these touch host state.
+- **Screenshots:** `doctor-nox --gui-screenshot DIR` (hidden QA flag) renders
+  the real window with **synthetic** results and runs no host probes. It saves
+  `welcome`, `overview`, `details` and `narrow` PNGs, in both themes.
+- **Packages (`.github/workflows/ci.yml`):** builds the package on each
+  supported family, inspects it, installs it, and runs `--list-checks`, the
+  CLI report modes, `--gui-smoke-test` and `--gui-self-test` from the
+  installed package as an unprivileged user, then compares the installed
+  package's reports with the source tree's:
+  - Fedora 45 and 44: the RPM, rpmlint, and an install with signature
+    enforcement on (signed with a throwaway key);
+  - openSUSE Tumbleweed: the same spec;
+  - Debian 13, Ubuntu 26.04 and Ubuntu 24.04 (command line only): the .deb,
+    and the AppStream metadata with `appstreamcli validate`;
+  - Arch: `makepkg` with `packaging/arch/PKGBUILD`;
+  - Python: the sdist and wheel (`twine check`, contents), the sdist building
+    the same wheel, and pipx installs with and without the `gui` extra.
 
 ### GUI checks and threading rule
 
-FE-XicoOS's `build_files/run-doctor-gui-check.sh` runs `--gui-smoke-test` and
-`--gui-self-test` in the image build with:
-- `python3 -I -u -X faulthandler`, so output is unbuffered and native crashes
-  print every thread's stack;
-- an outer `timeout --kill-after`;
-- an explanation of the exit status (124 timeout, 134 abort, 137 kill, 139 segfault);
-- the last output lines re-emitted as `::error::` annotations;
-- disk and memory figures at the moment of failure.
-
 The self-test prints a flushed `[doctor self-test]` checkpoint for every step,
 installs a Qt message handler, and dumps all thread stacks if it hangs for
-60 s. It never opens modal dialogs.
+60 s. It never opens modal dialogs. Image builds that ship Doctor (FE-XicoOS
+does) run `--gui-smoke-test` and `--gui-self-test` with `python3 -I -u -X
+faulthandler` under an outer `timeout`.
 
 **Threading rule:**
 - `ScanThread` signals are emitted from the scan thread and must be connected
   with `Qt.QueuedConnection` to `@Slot` methods of `Window`. **Never connect
   them to a lambda.** PySide6 runs lambda receivers on the emitting thread, so
   widget code would run off the GUI thread.
-- That is what crashed the v1.0 image build.
+- That is what crashed an early image build.
 - `tests/test_doctor_nox.py::GuiThreadRuleTests` enforces this, and each
   slot records any off-thread call in `Window.thread_violations`.
-
-## Runtime verification on FE-ROYO (after a signed image is published)
-
-1. `rpm-ostree status` or `sudo bootc status`: confirm you booted the new image.
-2. Launch **Doctor NoX** from the Plasma menu.
-   - The window icon should be Doctor's own magenta medical badge.
-   - No password prompt should appear.
-3. Run `doctor-nox --summary` in Foot, then `echo $?`. Expect 0 unless an
-   ERROR is shown.
-4. Check **System & bootc**:
-   - It matches `sudo bootc status`: booted image, rollback, staged and pinned.
-   - If it says "snapshot", open FE-Xico Updater → Status and rescan.
-5. Check **Hardware & Gaming**:
-   - NVIDIA Open shows "NVIDIA Open kernel driver" and `nvidia-smi` responds.
-   - Plug in the Hyperkin controller and confirm the controller finding lists
-     it with the right interface/driver.
-6. Check **Updates**. The timer states should match
-   `systemctl is-enabled fe-xicoos-auto-update.timer bootc-fetch-apply-updates.timer`.
-7. Press Scan several times quickly, then close the window during a scan. It
-   must close cleanly, without a crash or hang.
-8. Export a redacted .txt. Confirm your username, hostname and IPs are absent.
-9. Confirm Foot opens, Dolphin F4 opens the embedded terminal, and `konsole`
-   is not installed.

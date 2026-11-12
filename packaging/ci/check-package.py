@@ -3,23 +3,38 @@
 
     check-package.py PACKAGE.rpm
 
-Prints GitHub annotations; exit 1 on any difference.
+Prints GitHub annotations; exit 1 on any difference. The PySide6 dependency is
+python3-pyside6 on Fedora and python3NN-pyside6 on openSUSE (checked by the
+distribution the package was built on, read from /etc/os-release).
 """
+import re
 import subprocess
 import sys
 
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
-MODULES = ("__init__", "context", "engine", "gui", "model", "report", "runner", "theme", "viewmodel")
+MODULES = ("__init__", "__main__", "cli", "context", "distro", "engine", "gui", "model", "report", "runner",
+           "theme", "viewmodel")
 PROBES = ("__init__", "hardware", "logs", "network", "security", "software", "storage", "system", "updates")
 EXPECTED = {
     "/usr/bin/doctor-nox",
     "/usr/share/applications/io.github.royoshi.doctornox.desktop",
+    "/usr/share/metainfo/io.github.royoshi.doctornox.metainfo.xml",
     "/usr/share/doctor-nox/doctor-nox-report.schema.json",
     *(f"/usr/share/doctor-nox/doctor_nox/{m}.py" for m in MODULES),
     *(f"/usr/share/doctor-nox/doctor_nox/probes/{m}.py" for m in PROBES),
     *(f"/usr/share/icons/hicolor/{n}x{n}/apps/io.github.royoshi.doctornox.png" for n in ICON_SIZES),
 }
-REQUIRED_DEPS = {"python3", "python3-pyside6", "hicolor-icon-theme"}
+REQUIRED_DEPS = {"python3", "hicolor-icon-theme"}
+PYSIDE_FEDORA = re.compile(r"python3-pyside6")
+PYSIDE_SUSE = re.compile(r"python3\d*-pyside6")
+
+
+def built_on_suse():
+    try:
+        text = open("/etc/os-release").read()
+    except OSError:
+        return False
+    return bool(re.search(r'^ID(_LIKE)?=.*suse', text, re.M))
 
 
 def query(rpm, *args):
@@ -54,6 +69,9 @@ def main():
     missing = REQUIRED_DEPS - requires
     if missing:
         problems.append(f"missing Requires: {sorted(missing)}")
+    pyside = PYSIDE_SUSE if built_on_suse() else PYSIDE_FEDORA
+    if not any(pyside.fullmatch(r) for r in requires):
+        problems.append(f"missing Requires: {pyside.pattern}")
     if not any(r == "python(abi)" for r in requires):
         problems.append("missing Requires: python(abi)")
     arch = query(rpm, "--qf", "%{ARCH}")
@@ -67,7 +85,8 @@ def main():
             print(f"::error title=Package contents::{p}")
         return 1
     print(f"::notice title=Package contents::{len(plain)} application files as expected, bytecode and LICENSE shipped, "
-          f"noarch, no scriptlets, nothing writable or set-id; Requires include {', '.join(sorted(REQUIRED_DEPS))}, python(abi)")
+          f"noarch, no scriptlets, nothing writable or set-id; Requires include {', '.join(sorted(REQUIRED_DEPS))}, "
+          f"PySide6, python(abi)")
     return 0
 
 

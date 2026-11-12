@@ -1,6 +1,7 @@
-"""Doctor NoX — read-only FE-XicoOS system-health diagnostics.
+"""Doctor NoX — read-only system health checks for Linux.
 
 Layout:
+  distro     which Linux this is, and the rules for where each check applies
   model      findings, severities, categories, report schema
   runner     allowlisted, bounded, cancellable subprocess execution
   context    probe environment (fixture-capable filesystem root, env, kernel)
@@ -9,6 +10,7 @@ Layout:
   report     text / JSON output and best-effort redaction for sharing
   viewmodel  Qt-free filtering, grouping and detail rendering for the GUI
   gui        PySide6 Qt Widgets desktop application
+  cli        command line (also the `doctor-nox` entry point)
 
 Nothing in this package changes the system: no privileged helpers, no
 service control, no bootc/rpm-ostree transactions, no network requests.

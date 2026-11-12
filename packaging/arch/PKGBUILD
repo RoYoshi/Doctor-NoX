@@ -1,0 +1,47 @@
+# Maintainer: RoYoshi <99851152+RoYoshi@users.noreply.github.com>
+#
+# Doctor NoX for Arch Linux and derivatives (also the AUR package). Builds the
+# wheel from pyproject.toml and installs it, including the desktop entry,
+# AppStream data, icons and report schema under /usr/share.
+#
+# Before publishing a release to the AUR: set pkgver, run `updpkgsums` so the
+# tarball checksum is pinned, then `makepkg --printsrcinfo > .SRCINFO`.
+# packaging/build-arch.sh builds this from the local Git tree instead.
+
+pkgname=doctor-nox
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Read-only system health checks for Linux, with a desktop window and a command line"
+arch=('any')
+url="https://github.com/RoYoshi/Doctor-NoX"
+license=('Apache-2.0')
+depends=('python' 'hicolor-icon-theme')
+makedepends=('python-build' 'python-installer' 'python-hatchling')
+checkdepends=('python-jsonschema')
+optdepends=('pyside6: the desktop window'
+            'pciutils: graphics card names'
+            'pacman-contrib: pacdiff, to merge .pacnew files Doctor NoX reports')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+_srcdir() {
+    # GitHub names the top folder after the repository: Doctor-NoX-1.0.0
+    printf '%s\n' "$srcdir"/*-"$pkgver"
+}
+
+build() {
+    cd "$(_srcdir)"
+    python -m build --wheel --no-isolation
+}
+
+check() {
+    cd "$(_srcdir)"
+    # Fixtures only: no host commands are run through Doctor's checks.
+    PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests
+}
+
+package() {
+    cd "$(_srcdir)"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+    install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

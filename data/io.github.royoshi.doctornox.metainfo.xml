@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 RoYoshi; this file is licensed CC0-1.0 -->
+<component type="desktop-application">
+  <id>io.github.royoshi.doctornox</id>
+  <name>Doctor NoX</name>
+  <summary>Check your Linux system's health</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <developer id="io.github.royoshi">
+    <name>RoYoshi</name>
+  </developer>
+  <description>
+    <p>
+      Doctor NoX looks at the parts of a Linux system that tend to go wrong and explains what it
+      finds: pending restarts and package problems, image deployments on Fedora Atomic and other
+      OSTree systems, SELinux or AppArmor, failed services, graphics drivers and game controllers,
+      disk space, Flatpak and Snap, the network and boot errors.
+    </p>
+    <p>
+      It only looks. It never needs administrator rights, never changes anything and never
+      connects to the internet. Reports can be saved with personal details removed for sharing.
+    </p>
+    <p>
+      It knows Fedora (including Atomic desktops and bootc), Debian and Ubuntu, Arch and SteamOS,
+      and openSUSE, and runs its general checks on any other Linux.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.royoshi.doctornox.desktop</launchable>
+  <url type="homepage">https://github.com/RoYoshi/Doctor-NoX</url>
+  <url type="bugtracker">https://github.com/RoYoshi/Doctor-NoX/issues</url>
+  <url type="vcs-browser">https://github.com/RoYoshi/Doctor-NoX</url>
+  <provides>
+    <binary>doctor-nox</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>Monitor</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <releases>
+    <release version="1.0.0" date="2026-11-12">
+      <description>
+        <p>First release for every Linux: Fedora (including Atomic and bootc), Debian, Ubuntu, Arch, SteamOS and openSUSE.</p>
+      </description>
+    </release>
+  </releases>
+</component>

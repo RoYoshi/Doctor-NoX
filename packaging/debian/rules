@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# Doctor NoX for Debian and Ubuntu: pybuild builds the wheel (pyproject.toml,
+# hatchling) and installs it, including the desktop entry, AppStream data,
+# icons and report schema under /usr/share.
+
+# No PYBUILD_NAME: it would send the files to debian/python3-doctor-nox, a
+# library package this source does not have. With one binary package
+# debhelper installs straight into debian/doctor-nox.
+
+%:
+	dh $@ --buildsystem=pybuild
+
+# The project's own tests, run from the source tree: fixtures only, no host
+# commands are run through Doctor's checks. GUI tests skip without PySide6.
+override_dh_auto_test:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests

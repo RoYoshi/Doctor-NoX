@@ -1,0 +1,31 @@
+Source: doctor-nox
+Section: admin
+Priority: optional
+Maintainer: RoYoshi <99851152+RoYoshi@users.noreply.github.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-sequence-python3,
+               pybuild-plugin-pyproject,
+               python3-all (>= 3.10),
+               python3-hatchling,
+               desktop-file-utils,
+Standards-Version: 4.7.0
+Homepage: https://github.com/RoYoshi/Doctor-NoX
+Rules-Requires-Root: no
+
+Package: doctor-nox
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends},
+         hicolor-icon-theme,
+Recommends: python3-pyside6.qtwidgets,
+Suggests: pciutils,
+Description: read-only system health checks for Linux
+ Doctor NoX looks at the parts of a Linux system that tend to go wrong and
+ explains what it finds: pending restarts, broken or half-installed packages,
+ leftover config files, automatic updates, AppArmor or SELinux, the firewall,
+ failed services, graphics drivers, game controllers, disk space, Flatpak and
+ Snap, the network and boot errors.
+ .
+ It is strictly read-only: it never needs root, never changes the system and
+ never makes network requests. It has a desktop window (needs PySide6) and a
+ command line with text, JSON and redacted reports.
