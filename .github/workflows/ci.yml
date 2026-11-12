@@ -7,7 +7,11 @@
 #   openSUSE    the same RPM spec, built and installed on Tumbleweed
 #   Debian      .deb on Debian 13, Ubuntu 26.04 LTS and Ubuntu 24.04 LTS
 #   Arch        makepkg with packaging/arch/PKGBUILD (also the AUR recipe)
-#   Python      sdist and wheel; pipx install, with and without the GUI extra
+#   Python      sdist and wheel; pipx install, with and without the GUI extra;
+#               the source tests on Python 3.10, the oldest supported
+#   Flatpak     built with flatpak-builder on the KDE runtime and PySide BaseApp
+#               from Flathub, then run: GUI tests, a scan of the host through
+#               flatpak-spawn --host, and the permission turned off
 # Nothing here publishes anything. Releases: release.yml.
 name: CI
 on:
@@ -284,5 +288,62 @@ jobs:
         if: always()
         with:
           name: doctor-nox-ci-python
+          path: dist/
+          if-no-files-found: ignore
+
+  oldest-python:
+    name: Python 3.10 (oldest supported)
+    runs-on: ubuntu-24.04
+    container: python:3.10-slim
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source tests
+        run: |
+          python3 -m pip install --quiet --root-user-action=ignore jsonschema
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:45
+      # flatpak-builder and flatpak run need user namespaces and mounts.
+      options: --privileged
+    timeout-minutes: 60
+    steps:
+      - name: Bootstrap Git
+        timeout-minutes: 5
+        run: dnf5 -y install --setopt=install_weak_deps=False git-core
+      - uses: actions/checkout@v4
+      - name: Install Flatpak and the KDE SDK
+        timeout-minutes: 25
+        run: |
+          dnf5 -y install --setopt=install_weak_deps=False flatpak flatpak-builder dbus-daemon dbus-tools \
+            python3 python3-jsonschema
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # Flathub provides the KDE runtime and the PySide BaseApp the manifest builds on.
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive flathub org.kde.Sdk//6.10 org.kde.Platform//6.10 \
+            io.qt.PySide.BaseApp//6.10
+          printf '::notice title=Versions (Flatpak)::%s; %s\n' "$(flatpak --version)" "$(flatpak-builder --version)"
+      - name: Build the Flatpak
+        timeout-minutes: 20
+        run: |
+          flatpak-builder --user --install --force-clean --disable-rofiles-fuse --repo=flatpak-repo \
+            flatpak-build packaging/flatpak/io.github.royoshi.doctornox.yml
+          mkdir -p dist
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo flatpak-repo \
+            dist/io.github.royoshi.doctornox.flatpak io.github.royoshi.doctornox
+          printf '::notice title=Bundle::%s, %s bytes\n' io.github.royoshi.doctornox.flatpak \
+            "$(stat -c %s dist/io.github.royoshi.doctornox.flatpak)"
+      - name: Run the installed Flatpak (GUI tests, a host scan, the permission turned off)
+        run: |
+          export XDG_RUNTIME_DIR="$(mktemp -d)"; chmod 0700 "$XDG_RUNTIME_DIR"
+          dbus-run-session -- bash packaging/ci/check-flatpak.sh data/doctor-nox-report.schema.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-ci-flatpak
           path: dist/
           if-no-files-found: ignore

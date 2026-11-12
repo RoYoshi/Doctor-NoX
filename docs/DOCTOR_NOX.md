@@ -17,6 +17,7 @@ explicitly save, never needs root and never makes network requests.
 | One area / one check | `doctor-nox --only hardware --only system.image` |
 | List checks, and which apply here | `doctor-nox --list-checks` |
 | From a source checkout | `python3 -m doctor_nox …` or `bin/doctor-nox …` |
+| The Flatpak | `flatpak run io.github.royoshi.doctornox …` (the checks run on the host; see [The Flatpak](#the-flatpak)) |
 
 CLI exit status: **0** no ERROR finding · **1** at least one ERROR · **2** usage
 error · **3** Doctor itself failed. WARN and UNKNOWN never change the status.
@@ -341,6 +342,16 @@ settings and says so.
   so multi-call tools such as `modinfo` (a link to `kmod`) behave. Root-produced
   state files must be regular, non-symlink, root-owned and not
   group/world-writable before they are believed.
+- **The Flatpak's one host command.** From its sandbox the Flatpak starts
+  only `flatpak-spawn --host --watch-bus /usr/bin/python3 -I -B
+  <app folder>/share/doctor-nox/doctor_nox/hostrun.py`, followed by either
+  `--list-checks` or `--json --deadline N` plus `--only ID` pairs: Doctor's
+  own read-only modes (`runner.validate_host_doctor`). Anything else raises
+  before a process is created. Inside the sandbox root's files show up as
+  owned by the overflow user, so ownership proves nothing there:
+  `flatpak-spawn` is trusted when it is under `/usr` on a read-only mount and
+  not group/world-writable. On the host the scan is the ordinary one, with
+  the same allowlist.
 - **Privacy.**
   - No network requests, telemetry or automatic exports.
   - Doctor never reads tokens, keyrings, SSH keys, shell history or private app data.
@@ -407,6 +418,10 @@ doctor_nox/
   gui.py        PySide6 Qt Widgets window, stylesheet, status-pill delegates,
                 worker thread, self-test, synthetic-data screenshots
   cli.py        the command line; also the `doctor-nox` entry point
+  flatpak.py    the Flatpak build: recognise it, run the scan on the host,
+                explain in one finding when that is not possible
+  hostrun.py    what the host's Python starts in the Flatpak build: checks
+                for Python 3.10, then runs cli.py
 ```
 
 How it is installed:
@@ -415,11 +430,58 @@ How it is installed:
 |---|---|---|
 | RPM (Fedora, openSUSE) | `/usr/share/doctor-nox/doctor_nox/`, with bytecode | `bin/doctor-nox` → `/usr/bin/doctor-nox` |
 | .deb, Arch, pip, pipx | the Python module directory (from the wheel) | the `doctor-nox` entry point |
+| Flatpak | `/app/share/doctor-nox/doctor_nox/`, with bytecode | `bin/doctor-nox` → `/app/bin/doctor-nox` |
 
 Every format installs `/usr/share/applications/io.github.royoshi.doctornox.desktop`,
 `/usr/share/metainfo/io.github.royoshi.doctornox.metainfo.xml`,
 `/usr/share/doctor-nox/doctor-nox-report.schema.json` and the hicolor icons
-(pip and pipx under their own prefix).
+(pip and pipx under their own prefix, the Flatpak under `/app`).
+
+### The Flatpak
+
+Inside its sandbox Doctor would see the runtime's `/usr` and `/etc`, its own
+private `/var` and `/run`, and only its own processes and mounts: nothing of
+the computer it is meant to check. So the Flatpak
+(`packaging/flatpak/io.github.royoshi.doctornox.yml`) runs the scan on the
+host:
+
+1. `flatpak.sandbox_app_path()` recognises Doctor's own Flatpak: its code is
+   under `/app`, and `/.flatpak-info`, which Flatpak itself writes, names
+   `io.github.royoshi.doctornox`. That file also gives the app's folder as
+   the host sees it.
+2. `engine.scan()` and `--list-checks` hand over to `flatpak.scan_on_host()`
+   and `list_checks_on_host()`. These start the host command described under
+   [Safety boundaries](#safety-boundaries-enforced-in-code-and-by-tests),
+   which needs the `org.freedesktop.Flatpak` permission.
+3. `hostrun.py` runs on the host's `/usr/bin/python3`. It stops with exit
+   status 64 on anything older than 3.10, and is written so that older
+   Pythons can still read it and say why. Then it runs Doctor's ordinary
+   command line from the app's folder: the same checks, allowlist and
+   read-only rules as a native install, without root.
+4. The window and the command line show the host's report. `--watch-bus`
+   ends the host process when the Flatpak's side is stopped (timeout or
+   cancel).
+
+Apart from that permission the Flatpak asks only for the display (Wayland,
+or X11 as a fallback) and IPC: no network and no file access. But the
+permission itself lets an app run anything on the host as you, so the
+sandbox is not what keeps Doctor read-only. Doctor's own code is: the one
+host command above, and the ordinary allowlist on the host.
+
+When no report comes back, the scan shows one Unknown finding,
+`system.host_access` ("Access to this computer"), instead of the sandbox's
+state:
+
+| Cause | Summary shown |
+|---|---|
+| the permission is off (Flatseal, the desktop's app permissions, `flatpak override`) | Doctor cannot check this computer: running commands outside the sandbox is off. The guidance gives the command that turns it back on. |
+| no `/usr/bin/python3`, or one older than 3.10 | Doctor needs Python 3.10 or later on this computer |
+| `flatpak-spawn` missing or untrusted | Doctor cannot reach this computer from the Flatpak |
+| the host command could not start | The check on the host could not start |
+| timeout or cancel | Not completed (the report is marked incomplete) |
+| anything else | The check on the host failed, with the end of its error output as evidence |
+
+The About dialog says that the Flatpak's checks run on the host.
 
 **Why PySide6 Qt Widgets:**
 - Every supported family packages PySide6, and pip provides it elsewhere.
@@ -454,6 +516,14 @@ What the tests cover:
 - **Runner:** tested against a temporary helper script (output cap, timeout,
   cancel killing grandchildren, Unicode, minimal environment, argv[0] for
   multi-call tools).
+- **Flatpak (`tests/test_doctor_nox_flatpak.py`):**
+  - only Doctor's own Flatpak is recognised;
+  - the exact host command line, and refusal of any other;
+  - an untrusted `flatpak-spawn` is never run;
+  - each failure becomes the one Unknown finding;
+  - the engine and the command line hand over to the host;
+  - `hostrun.py` refuses old Pythons, and is checked against Python 3.6's
+    grammar.
 - **GUI self-test:** uses synthetic probes to load, filter, select, export,
   rescan, ignore a rapid refresh, cancel, and close while scanning.
   - It also switches to Light, Dark and Match system and renders the whole
@@ -479,6 +549,16 @@ What the tests cover:
   - Arch: `makepkg` with `packaging/arch/PKGBUILD`;
   - Python: the sdist and wheel (`twine check`, contents), the sdist building
     the same wheel, and pipx installs with and without the `gui` extra.
+- **Flatpak (`flatpak` job):** builds the Flatpak with `flatpak-builder` in a
+  Fedora 45 container and installs it. It then runs:
+  - `--version`, and the GUI tests offscreen;
+  - a scan through `flatpak-spawn --host`, which must validate and describe
+    the Fedora container, not the sandbox;
+  - `--list-checks` from the host;
+  - a run with the permission removed, which must be the one Unknown
+    finding.
+- **Oldest Python (`oldest-python` job):** the unit tests on Python 3.10, the
+  oldest that Doctor supports.
 
 ### GUI checks and threading rule
 

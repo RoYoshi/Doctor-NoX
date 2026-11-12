@@ -97,6 +97,60 @@ ALLOWED: dict[str, CommandSpec] = {
     ), timeout=6.0),
 }
 
+# ── the Flatpak build: Doctor's own command line, started on the host ────────
+#: flatpak-spawn comes with the Flatpak runtime; --host needs org.freedesktop.Flatpak.
+FLATPAK_SPAWN = ("/usr/bin/flatpak-spawn",)
+#: The host's own interpreter, never looked up on PATH.
+HOST_PYTHON = "/usr/bin/python3"
+HOST_SCRIPT = re.compile(r"/[^\x00-\x1f\x7f]{1,4000}/doctor_nox/hostrun\.py")
+HOST_DEADLINE = re.compile(r"[0-9]{1,3}(?:\.[0-9]{1,3})?")
+HOST_ONLY = re.compile(r"[a-z][a-z0-9_]{0,40}(?:\.[a-z][a-z0-9_]{0,40}){0,4}")
+
+
+def validate_host_doctor(script: str, args: Sequence[str]) -> None:
+    """The only host command lines the Flatpak build may start (read-only report modes).
+
+    hostrun.py ARGS, where ARGS is `--list-checks`, or `--json --deadline N`
+    followed by any number of `--only ID` pairs.
+    """
+    if not isinstance(script, str) or not HOST_SCRIPT.fullmatch(script) or "/../" in script or "/./" in script:
+        raise CommandNotAllowed(f"host script not allowlisted: {script!r}")
+    args = list(args)
+    if not all(isinstance(a, str) for a in args):
+        raise CommandNotAllowed("arguments must be strings")
+    if args == ["--list-checks"]:
+        return
+    if len(args) >= 3 and args[:2] == ["--json", "--deadline"] and HOST_DEADLINE.fullmatch(args[2]):
+        rest = args[3:]
+        if len(rest) % 2 == 0 and all(rest[i] == "--only" and HOST_ONLY.fullmatch(rest[i + 1])
+                                      for i in range(0, len(rest), 2)):
+            return
+    raise CommandNotAllowed(f"host arguments not allowlisted: {args!r}")
+
+
+def sandbox_trusted_executable(paths: Sequence[str]) -> tuple[str | None, str]:
+    """trusted_executable for programs of the Flatpak runtime, seen from inside the sandbox.
+
+    The sandbox shows root's files as owned by the overflow user, and a
+    per-user runtime's files as the user's own, so ownership proves nothing
+    there. What does: the file sits under /usr on a read-only mount and is not
+    group or world writable.
+    """
+    seen_untrusted = ""
+    for candidate in paths:
+        try:
+            real = os.path.realpath(candidate)
+            info = os.stat(real)
+            readonly = bool(os.statvfs(real).f_flag & os.ST_RDONLY)
+        except OSError:
+            continue
+        if (stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 and not info.st_mode & 0o022
+                and real.startswith("/usr/") and readonly):
+            return real, "ok"
+        seen_untrusted = candidate
+    return (None, "untrusted") if seen_untrusted else (None, "missing")
+
+
 #: Verbs that must never appear in any allowed pattern (enforced by tests).
 FORBIDDEN_VERBS = frozenset({
     "upgrade", "switch", "rollback", "edit", "install", "uninstall", "remove", "update",
@@ -190,7 +244,8 @@ def _safe_env() -> dict[str, str]:
     if runtime == f"/run/user/{uid}":
         env["XDG_RUNTIME_DIR"] = runtime
     bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
-    if re.fullmatch(rf"unix:path=/run/user/{uid}/bus", bus):
+    # /run/flatpak/bus: the session bus inside a Flatpak sandbox (flatpak-spawn needs it)
+    if re.fullmatch(rf"unix:path=/run/user/{uid}/bus|unix:path=/run/flatpak/bus", bus):
         env["DBUS_SESSION_BUS_ADDRESS"] = bus
     try:
         import pwd
@@ -227,6 +282,28 @@ class Runner:
                 return self._record(CmdResult(argv_display, "cancelled", None, "", ""))
             return self._record(self._execute((argv0, *args), argv_display, spec,
                                               min(timeout or spec.timeout, spec.timeout), exe))
+
+    def run_host_doctor(self, script: str, args: Sequence[str], timeout: float,
+                        resolve=sandbox_trusted_executable) -> CmdResult:
+        """From the Flatpak sandbox, run Doctor's command line on the host.
+
+        flatpak-spawn --host --watch-bus /usr/bin/python3 -I -B SCRIPT ARGS: the host's
+        Python runs Doctor's code from the app's folder. --watch-bus ends the host
+        process when flatpak-spawn is killed (timeout, cancel). Read-only modes only.
+        """
+        validate_host_doctor(script, args)  # raises before anything is executed
+        argv_display = ("flatpak-spawn", "--host", HOST_PYTHON, "-I", "-B", script, *args)
+        if self.cancel.is_set():
+            return self._record(CmdResult(argv_display, "cancelled", None, "", ""))
+        exe, why = resolve(FLATPAK_SPAWN)
+        if exe is None:
+            return self._record(CmdResult(argv_display, why, None, "", ""))
+        spec = CommandSpec(FLATPAK_SPAWN, (), timeout=330.0, max_stdout=16 * 1024 * 1024, max_stderr=64 * 1024)
+        argv = (FLATPAK_SPAWN[0], "--host", "--watch-bus", HOST_PYTHON, "-I", "-B", script, *args)
+        with self._slots:
+            if self.cancel.is_set():
+                return self._record(CmdResult(argv_display, "cancelled", None, "", ""))
+            return self._record(self._execute(argv, argv_display, spec, min(timeout, spec.timeout), exe))
 
     def _record(self, result: CmdResult) -> CmdResult:
         with self._log_lock:

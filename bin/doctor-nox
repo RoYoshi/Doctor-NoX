@@ -1,17 +1,22 @@
 #!/usr/bin/python3 -I
-"""Doctor NoX launcher for the RPM layout (/usr/share/doctor-nox) and source checkouts.
+"""Doctor NoX launcher for the RPM layout (/usr/share/doctor-nox), the Flatpak
+(/app/share/doctor-nox) and source checkouts.
 
 pip, pipx, Debian and Arch installs use the `doctor-nox` entry point instead;
-both run doctor_nox.cli.main.
+all of them run doctor_nox.cli.main.
 """
 from pathlib import Path
 import sys
 
-# The RPM's private package directory first; then a source checkout (bin/ next to doctor_nox/).
-for candidate in ("/usr/share/doctor-nox", str(Path(__file__).resolve().parents[1])):
+# The RPM's private package directory, then the Flatpak's, then a source checkout
+# (bin/ next to doctor_nox/).
+for candidate in ("/usr/share/doctor-nox", "/app/share/doctor-nox", str(Path(__file__).resolve().parents[1])):
     if Path(candidate, "doctor_nox").is_dir():
         sys.path.insert(0, candidate)
         break
+if sys.path[0] == "/app/share/doctor-nox":
+    # -I ignores PYTHONPATH; the Flatpak's PySide6 lives in the app's own site-packages.
+    sys.path[1:1] = [str(p) for p in sorted(Path("/app/lib").glob("python3*/site-packages")) if p.is_dir()]
 
 from doctor_nox.cli import main  # noqa: E402
 

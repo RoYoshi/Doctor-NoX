@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 
 from ..distro import FAMILY_TITLE, OSTREE
 from ..model import INFO, PASS, UNKNOWN, WARN, Finding
@@ -112,9 +113,22 @@ def _age(when: datetime.datetime | None, now: datetime.datetime) -> str:
     return f"{days:.0f} days" if days >= 0 else ""
 
 
+#: Fractional seconds, which bootc prints with up to nine digits.
+_FRACTION = re.compile(r"(T\d{2}:\d{2}:\d{2})\.(\d+)")
+
+
 def _iso(timestamp) -> datetime.datetime | None:
+    """An RFC 3339 timestamp (bootc's) as an aware datetime, or None.
+
+    Python 3.10's fromisoformat takes neither "Z" nor more than six
+    fractional digits, so both are normalised first.
+    """
+    text = str(timestamp).strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    text = _FRACTION.sub(lambda m: f"{m.group(1)}.{m.group(2)[:6].ljust(6, '0')}", text, count=1)
     try:
-        ts = datetime.datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+        ts = datetime.datetime.fromisoformat(text)
     except (ValueError, TypeError):
         return None
     return ts if ts.tzinfo else None

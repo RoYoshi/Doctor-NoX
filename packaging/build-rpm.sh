@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Build the Doctor NoX source tarball, SRPM and noarch RPM from a clean
-# Git tree. Output: dist/. Needs rpm-build, python3-devel, desktop-file-utils.
+# Git tree. Output: dist/. Needs rpm-build, desktop-file-utils, and
+# python3-devel (Fedora) or python-rpm-macros (openSUSE).
 #
-#   packaging/build-rpm.sh [--allow-dirty]
+#   [DIST=.tag] packaging/build-rpm.sh [--allow-dirty]
 #
+# DIST sets the release tag where the distribution defines none (openSUSE):
+# DIST=.opensuse gives doctor-nox-X.Y.Z-1.opensuse.noarch.rpm.
 # The tarball contains exactly the committed files (git archive), so a build
 # can always be traced to a commit. The spec Version must match VERSION.
 set -euo pipefail
@@ -34,7 +37,9 @@ else
     git archive --format=tar.gz --prefix="doctor-nox-$version/" -o "$top/SOURCES/doctor-nox-$version.tar.gz" HEAD
 fi
 cp packaging/doctor-nox.spec "$top/SPECS/"
-rpmbuild --define "_topdir $top" -ba "$top/SPECS/doctor-nox.spec"
+dist=()
+[[ -n "${DIST:-}" ]] && dist=(--define "dist ${DIST}")
+rpmbuild --define "_topdir $top" "${dist[@]}" -ba "$top/SPECS/doctor-nox.spec"
 mkdir -p dist
 cp "$top"/SRPMS/*.src.rpm "$top"/RPMS/noarch/*.noarch.rpm dist/
 ls -l dist/*.rpm

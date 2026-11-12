@@ -1,10 +1,20 @@
 # Releasing Doctor NoX
 
-Doctor NoX is released as signed `noarch` RPMs, one per supported Fedora
-release (currently 45 and 44, built from the same commit). FE-XicoOS installs a
-specific, reviewed release; it never builds Doctor from this repository's
-`main` branch. The other formats are built and tested on every commit but not
-yet released: see [Other formats](#other-formats).
+Each Doctor NoX release has a package for every supported system, all built
+from the same commit:
+
+| System | File | Signed |
+|---|---|---|
+| Fedora 45 and 44 | `doctor-nox-X.Y.Z-1.fc45.noarch.rpm`, `…fc44…` (+ SRPMs) | RPM signature |
+| openSUSE Tumbleweed | `doctor-nox-X.Y.Z-1.opensuse.noarch.rpm` (+ SRPM) | RPM signature |
+| Debian 13, Ubuntu 24.04+ | `doctor-nox_X.Y.Z_all.deb` | via `SHA256SUMS.asc` |
+| Arch Linux | `doctor-nox-X.Y.Z-1-any.pkg.tar.zst` | via `SHA256SUMS.asc` |
+| pip / pipx | `doctor_nox-X.Y.Z-py3-none-any.whl`, `doctor_nox-X.Y.Z.tar.gz` | via `SHA256SUMS.asc` |
+
+Every file is listed in `SHA256SUMS`, signed with the same key as the RPMs, and
+has a `.provenance.json` with its hash, the source commit and the workflow
+run. FE-XicoOS installs a specific, reviewed release; it never builds Doctor
+from this repository's `main` branch.
 
 ## Versioning
 
@@ -66,17 +76,21 @@ or commits. Only the **public** key is committed.
    After you approve the `doctor-release` environment, the workflow:
    - checks the version, that the tag is new, and that the secret key is
      exactly the committed, pinned public key;
-   - runs the source tests and builds the source tarball, SRPM and RPM for
-     Fedora 45 and 44;
+   - runs the source tests and builds the RPMs for Fedora 45 and 44 and
+     openSUSE Tumbleweed, the .deb on Debian 13, the Arch package with
+     `makepkg`, and the Python sdist and wheel;
    - signs every RPM and verifies it with `rpmkeys --checksig` against the
      committed public key only;
-   - installs each RPM in a clean Fedora container with RPM signature
-     enforcement on, then runs the installed-package checks as an
-     unprivileged user: CLI, reports, schema, redaction, GUI smoke and self
-     tests, and equivalence with the source tree;
-   - writes a provenance record per RPM: hashes, signature, source commit and
-     workflow run. It also writes `SHA256SUMS`, signed as `SHA256SUMS.asc`;
-   - creates a **draft** GitHub release `vX.Y.Z`. Nothing is published yet.
+   - installs each package in a clean container (the RPMs with signature
+     checks on; the .deb also on Ubuntu 26.04 and 24.04; the wheel with
+     pipx, with and without the GUI extra), then runs the installed-package
+     checks as an unprivileged user: CLI, reports, schema, redaction, GUI
+     smoke and self tests, and equivalence with the source tree;
+   - writes a provenance record per file: hash, source commit and workflow
+     run (and the signature, for RPMs). It also writes `SHA256SUMS` for every
+     package, signed as `SHA256SUMS.asc`;
+   - creates a **draft** GitHub release `vX.Y.Z`, with a table of which file
+     is for which system. Nothing is published yet.
 3. Review the draft: assets, notes and checks. Then publish it by hand.
 
 A green build alone never makes a release usable. It becomes usable only
@@ -85,10 +99,15 @@ after you publish it and FE-XicoOS pins it in a reviewed pull request.
 ## Verifying a release by hand
 
 ```bash
-rpmkeys --import RPM-GPG-KEY-doctor-nox        # compare its fingerprint with packaging/signing-key.fingerprint
-rpmkeys --checksig doctor-nox-X.Y.Z-1.fc45.noarch.rpm   # must report "signatures OK"
+gpg --import RPM-GPG-KEY-doctor-nox             # compare its fingerprint with packaging/signing-key.fingerprint
 gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS
+rpmkeys --import RPM-GPG-KEY-doctor-nox         # for RPMs, as root
+rpmkeys --checksig doctor-nox-X.Y.Z-1.fc45.noarch.rpm   # must report "signatures OK"
 ```
+
+The Arch package is built against Arch's Python of the day. After Arch moves
+to a newer Python it no longer loads; build `packaging/arch/PKGBUILD` instead
+(or install from the AUR once it is there).
 
 ## How FE-XicoOS consumes a release
 
@@ -105,25 +124,34 @@ Before installing, the image build checks:
 It fails if any check fails; it never skips Doctor. Updating Doctor in
 FE-XicoOS is a normal pull request that replaces those files.
 
-## Other formats
+## Not set up yet: PyPI, the AUR and Flathub
 
-Every commit's CI builds and tests these (see `.github/workflows/ci.yml`) and
-keeps them as workflow artifacts. The release workflow does not publish them
-yet; each one needs a decision and an account that belong to the owner.
+Each needs an account and a decision that belong to the owner; nothing here
+publishes to them.
 
-| Format | Built by | Still needed before it is released |
-|---|---|---|
-| openSUSE RPM | `packaging/build-rpm.sh` on Tumbleweed | signing in the release workflow, or an openSUSE Build Service project |
-| .deb (Debian 13, Ubuntu 24.04+) | `packaging/build-deb.sh` | attaching to releases, or a signed APT repository / Launchpad PPA |
-| Arch package and AUR | `packaging/build-arch.sh` with `packaging/arch/PKGBUILD` | an AUR account and SSH key; at release time `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`, then push to `aur.archlinux.org/doctor-nox.git` |
-| Python sdist and wheel (pip, pipx) | `python3 -m build` | a PyPI project with a trusted publisher for this repository's release workflow |
-| Flatpak | not yet | see below |
+| Where | What it needs |
+|---|---|
+| PyPI (`pipx install doctor-nox`) | a PyPI project `doctor-nox` with a trusted publisher for this repository's release workflow, and an upload job using it |
+| AUR | an AUR account with an SSH key. At release time: set `pkgver`, run `updpkgsums` (pins the tarball checksum) and `makepkg --printsrcinfo > .SRCINFO`, then push `PKGBUILD` and `.SRCINFO` to `aur.archlinux.org/doctor-nox.git` |
+| Flathub | a submission of `packaging/flatpak/io.github.royoshi.doctornox.yml`, with the `dir` source replaced by the release's git tag and commit |
 
-**Flatpak.** A sandboxed Doctor would not see most of what it checks: the
-host's `/var` and `/run` (package databases, restart flags, journal files),
-its mount table and its processes. It would need the
-`org.freedesktop.Flatpak` permission to run host commands, which Flathub
-reviews closely, and every file-based check would have to report "not
-visible from the sandbox" rather than a false pass. That is a design decision
-to make before any manifest is written.
+**Flathub and the Flatpak's permission.** The Flatpak runs its checks on the
+host through `flatpak-spawn --host`, which needs `--talk-name=org.freedesktop.Flatpak`.
+Flathub's linter reports that permission as an error
+(`finish-args-flatpak-spawn-access`). Flathub grants exceptions case by case,
+through a pull request to the linter's exceptions file, so the submission has
+to explain why: a diagnostics tool that inspects the system cannot do so from
+inside the sandbox, and what it runs on the host is its own read-only command
+line.
 
+**Flathub and the app ID.** For an app hosted on GitHub, Flathub works out the
+repository's address from the ID, taking its last part as written:
+`io.github.royoshi.doctornox` points at `github.com/royoshi/doctornox`, which is
+not this repository. Before submitting, either change the ID so its last part
+reads `Doctor-NoX`, or ask the reviewers to accept the current one; Flathub
+says it can grant that after checking by hand. The ID also names the desktop
+file, the metainfo and the icons in every package, so changing it is the
+owner's decision.
+
+The Flatpak's CI job builds a bundle (`io.github.royoshi.doctornox.flatpak`)
+for testing; it is not part of releases.

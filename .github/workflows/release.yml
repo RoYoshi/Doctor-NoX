@@ -1,12 +1,21 @@
-# Doctor NoX release: builds the RPMs for Fedora 45 and 44 from one commit,
-# signs them with the project's RPM signing key, verifies them against the
-# public key committed in this repository, installs and tests each one with
-# Fedora's signature enforcement on, and creates a DRAFT GitHub release.
+# Doctor NoX release: builds every package from one commit, signs the RPMs
+# with the project's RPM signing key, verifies them against the public key
+# committed in this repository, installs and tests each package, and creates
+# a DRAFT GitHub release with all of them and a signed SHA256SUMS:
+#   Fedora 45 and 44      signed noarch RPMs, installed with signature enforcement on
+#   openSUSE Tumbleweed   signed noarch RPM
+#   Debian and Ubuntu     .deb built on Debian 13, tested on Debian 13 and Ubuntu 26.04 and 24.04
+#   Arch Linux            package built with packaging/arch/PKGBUILD
+#   Python                sdist and wheel (pip, pipx)
+# Every file is listed in SHA256SUMS, which is signed (SHA256SUMS.asc), and has
+# a .provenance.json with its hash, source commit and workflow run.
 #
-# Runs only when started by hand (workflow_dispatch) and only through the
-# "doctor-release" environment, which should require a reviewer (docs/RELEASING.md).
-# Nothing is published until the draft release is reviewed and published by
-# hand. A successful build alone never makes a release usable.
+# Runs only when started by hand (workflow_dispatch). The jobs that use the
+# signing key, and the job that creates the draft, run only through the
+# "doctor-release" environment, which should require a reviewer
+# (docs/RELEASING.md). Nothing is published until the draft release is
+# reviewed and published by hand. A successful build alone never makes a
+# release usable.
 name: Release
 on:
   workflow_dispatch:
@@ -122,9 +131,249 @@ jobs:
           path: dist/*.rpm*
           if-no-files-found: error
 
+  opensuse:
+    name: Build, sign and test (openSUSE Tumbleweed)
+    runs-on: ubuntu-24.04
+    container: registry.opensuse.org/opensuse/tumbleweed:latest
+    environment: doctor-release
+    timeout-minutes: 40
+    steps:
+      - name: Bootstrap Git
+        # The container's awk is busybox's; desktop-file-utils needs GNU awk, which replaces it.
+        run: zypper --non-interactive install --no-recommends --force-resolution git-core tar gzip gawk
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        run: |
+          zypper --non-interactive install --no-recommends --force-resolution python3 rpm-build python-rpm-macros \
+            desktop-file-utils gpg2 dejavu-fonts util-linux shadow procps findutils
+          py="$(python3 -c 'import sys; print(f"python{sys.version_info[0]}{sys.version_info[1]}")')"
+          zypper --non-interactive install --no-recommends "$py-pyside6" "$py-jsonschema"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Check the version and the signing key
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          SIGNING_KEY: ${{ secrets.DOCTOR_RPM_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "$INPUT_VERSION" = "$version" ] || { echo "::error title=Version::input $INPUT_VERSION != VERSION $version"; exit 1; }
+          [ -n "$SIGNING_KEY" ] || { echo "::error title=Signing key::secret DOCTOR_RPM_SIGNING_KEY is not set (docs/RELEASING.md)"; exit 1; }
+          pinned="$(tr -d '[:space:]' < packaging/signing-key.fingerprint)"
+          public="$(gpg --show-keys --with-colons packaging/RPM-GPG-KEY-doctor-nox | awk -F: '/^fpr/ {print $10; exit}')"
+          [ "$public" = "$pinned" ] || { echo "::error title=Signing key::committed public key $public != pinned fingerprint $pinned"; exit 1; }
+      - name: Source tests
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+      - name: Build
+        run: DIST=.opensuse packaging/build-rpm.sh
+      - name: Sign and verify against the committed public key
+        env:
+          SIGNING_KEY: ${{ secrets.DOCTOR_RPM_SIGNING_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.DOCTOR_RPM_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"; chmod 0700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          pinned="$(tr -d '[:space:]' < packaging/signing-key.fingerprint)"
+          gpg --with-colons --list-secret-keys "$pinned" >/dev/null \
+            || { echo "::error title=Signing key::the secret key is not the pinned key $pinned"; exit 1; }
+          printf '%s' "$SIGNING_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          for rpm in dist/*.rpm; do
+            rpmsign --define "_gpg_name $pinned" \
+              --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $GNUPGHOME/passphrase" \
+              --addsign "$rpm"
+          done
+          # Verify with rpm's own keyring, holding only the committed public key.
+          rpmkeys --import packaging/RPM-GPG-KEY-doctor-nox
+          for rpm in dist/*.rpm; do
+            verify="$(rpmkeys --checksig "$rpm")"; echo "$verify"
+            grep -Eq 'signatures.* OK$' <<<"$verify" || { echo "::error title=Signature::$verify"; exit 1; }
+          done
+          rm -rf "$GNUPGHOME"
+      - name: Inspect the package
+        run: python3 -I packaging/ci/check-package.py dist/doctor-nox-*.noarch.rpm
+      - name: Install (signature checked by zypper) and test as an unprivileged user
+        run: |
+          zypper --non-interactive install dist/doctor-nox-*.noarch.rpm
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" rpm
+      - name: Provenance record
+        run: |
+          for rpm in dist/*.rpm; do
+            python3 -I packaging/ci/provenance.py "$rpm" rpm "container opensuse/tumbleweed" opensuse=tumbleweed
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-opensuse-tumbleweed
+          path: dist/*.rpm*
+          if-no-files-found: error
+
+  deb:
+    name: Build and test (.deb, Debian 13)
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Bootstrap Git
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        run: |
+          apt-get install -y --no-install-recommends build-essential dpkg-dev debhelper dh-python \
+            pybuild-plugin-pyproject python3-all python3-hatchling python3-jsonschema desktop-file-utils \
+            hicolor-icon-theme fonts-dejavu-core procps util-linux passwd python3-pyside6.qtwidgets qt6-qpa-plugins
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Check the version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "$INPUT_VERSION" = "$version" ] || { echo "::error title=Version::input $INPUT_VERSION != VERSION $version"; exit 1; }
+      - name: Source tests
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+      - name: Build
+        run: packaging/build-deb.sh
+      - name: Install and test as an unprivileged user
+        run: |
+          apt-get install -y --no-install-recommends ./dist/doctor-nox_*_all.deb
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" deb
+      - name: Provenance record
+        run: python3 -I packaging/ci/provenance.py dist/doctor-nox_*_all.deb deb "container debian:trixie"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-deb
+          path: dist/*.deb*
+          if-no-files-found: error
+
+  deb-install:
+    name: Install and test the .deb (${{ matrix.image }})
+    needs: deb
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - {image: "ubuntu:26.04", gui: true}
+          # Ubuntu packages PySide6 from 25.04 on: here the command line is tested.
+          - {image: "ubuntu:24.04", gui: false}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Bootstrap Git
+        run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - name: Install test tools
+        run: |
+          apt-get install -y --no-install-recommends desktop-file-utils hicolor-icon-theme python3-jsonschema \
+            fonts-dejavu-core procps util-linux passwd
+          if [ "${{ matrix.gui }}" = true ]; then
+            apt-get install -y --no-install-recommends python3-pyside6.qtwidgets qt6-qpa-plugins
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-deb
+          path: dist
+      - name: Install the released .deb and test as an unprivileged user
+        run: |
+          apt-get install -y --no-install-recommends ./dist/doctor-nox_*_all.deb
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" deb
+
+  arch:
+    name: Build and test (Arch Linux)
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 40
+    steps:
+      - name: Bootstrap Git
+        run: pacman -Syu --noconfirm --needed git
+      - uses: actions/checkout@v4
+      - name: Install build and test tools
+        run: |
+          pacman -S --noconfirm --needed base-devel python python-build python-installer python-hatchling \
+            python-jsonschema pyside6 ttf-dejavu desktop-file-utils hicolor-icon-theme
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          useradd -m builder
+      - name: Check the version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "$INPUT_VERSION" = "$version" ] || { echo "::error title=Version::input $INPUT_VERSION != VERSION $version"; exit 1; }
+      - name: Source tests
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+      - name: Build with makepkg (as a normal user)
+        run: |
+          chown -R builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- env HOME=/home/builder bash -c \
+            'git config --global --add safe.directory "$GITHUB_WORKSPACE" && packaging/build-arch.sh'
+      - name: Install and test as an unprivileged user
+        run: |
+          pacman -U --noconfirm dist/doctor-nox-*-any.pkg.tar.zst
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE" arch
+      - name: Provenance record
+        run: |
+          py="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          python3 -I packaging/ci/provenance.py dist/doctor-nox-*-any.pkg.tar.zst arch "container archlinux:latest" \
+            "python=$py"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arch
+          path: dist/*.pkg.tar.zst*
+          if-no-files-found: error
+
+  python:
+    name: Build and test (Python sdist and wheel)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "$INPUT_VERSION" = "$version" ] || { echo "::error title=Version::input $INPUT_VERSION != VERSION $version"; exit 1; }
+      - name: Build the sdist and wheel
+        run: |
+          python3 -m pip install --user --break-system-packages build twine jsonschema
+          python3 -m build
+          python3 -m twine check --strict dist/*
+          python3 packaging/ci/check-wheel.py dist/*.whl
+      - name: The sdist builds the same wheel and passes the tests
+        run: |
+          mkdir sdist && tar -xzf dist/doctor_nox-*.tar.gz -C sdist
+          (cd sdist/doctor_nox-* && python3 -m build --wheel --outdir ../wheel)
+          diff <(unzip -Z1 dist/*.whl | sort) <(unzip -Z1 sdist/wheel/*.whl | sort)
+          (cd sdist/doctor_nox-* && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests)
+      - name: pipx install, with and without the GUI extra
+        run: |
+          pipx install dist/doctor_nox-*.whl
+          doctor-nox --version
+          set +e; doctor-nox --json > report.json; rc=$?; set -e
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || { echo "::error title=pipx::doctor-nox --json exited $rc"; exit 1; }
+          python3 -I -c 'import json, sys, jsonschema; jsonschema.validate(json.load(open(sys.argv[1])), json.load(open(sys.argv[2])))' \
+            report.json data/doctor-nox-report.schema.json
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 \
+            fonts-dejavu-core
+          pipx install --force "$(ls dist/doctor_nox-*.whl)[gui]"
+          QT_QPA_PLATFORM=offscreen doctor-nox --gui-smoke-test
+          QT_QPA_PLATFORM=offscreen doctor-nox --gui-self-test
+      - name: Provenance records
+        run: |
+          python3 -I packaging/ci/provenance.py dist/doctor_nox-*.whl wheel "ubuntu-24.04 runner"
+          python3 -I packaging/ci/provenance.py dist/doctor_nox-*.tar.gz sdist "ubuntu-24.04 runner"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-python
+          path: dist/doctor_nox-*
+          if-no-files-found: error
+
   draft-release:
     name: Draft GitHub release (not published)
-    needs: build
+    needs: [build, opensuse, deb, deb-install, arch, python]
     runs-on: ubuntu-24.04
     environment: doctor-release
     permissions:
@@ -144,7 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           cd assets
-          sha256sum *.rpm > SHA256SUMS
+          sha256sum -- *.rpm *.deb *.pkg.tar.zst *.whl *.tar.gz > SHA256SUMS
           export GNUPGHOME="$(mktemp -d)"; chmod 0700 "$GNUPGHOME"
           printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
           pinned="$(tr -d '[:space:]' < ../packaging/signing-key.fingerprint)"
@@ -153,8 +402,26 @@ jobs:
           rm -rf "$GNUPGHOME"
           cp ../packaging/RPM-GPG-KEY-doctor-nox .
           ls -l
+          arch_pkg="$(ls *.pkg.tar.zst)"
+          arch_py="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["python"])' "$arch_pkg.provenance.json")"
+          cat > ../release-notes.md <<EOF
+          Doctor NoX $INPUT_VERSION: read-only system health checks for Linux, built from $GITHUB_SHA.
+
+          | System | File |
+          |---|---|
+          | Fedora 45 | $(ls *.fc45.noarch.rpm) (signed) |
+          | Fedora 44 | $(ls *.fc44.noarch.rpm) (signed) |
+          | openSUSE Tumbleweed | $(ls *.opensuse.noarch.rpm) (signed) |
+          | Debian 13, Ubuntu 24.04 and later | $(ls *.deb) |
+          | Arch Linux | $arch_pkg (built against Python $arch_py; once Arch moves to a newer Python, build packaging/arch/PKGBUILD instead) |
+          | Any Linux with Python 3.10 or later (pip, pipx) | $(ls *.whl), source $(ls *.tar.gz) |
+
+          Check every file: \`gpg --import RPM-GPG-KEY-doctor-nox && gpg --verify SHA256SUMS.asc SHA256SUMS && sha256sum -c SHA256SUMS\` (key fingerprint $pinned).
+          Check an RPM: \`sudo rpmkeys --import RPM-GPG-KEY-doctor-nox && rpmkeys --checksig <file>\`.
+          Each file has a .provenance.json with its hash, the source commit and the workflow run that built it.
+
+          Draft until reviewed and published by hand.
+          EOF
           gh release create "v$INPUT_VERSION" --draft --target "$GITHUB_SHA" \
-            --title "Doctor NoX $INPUT_VERSION" \
-            --notes "Signed noarch RPMs for Fedora 45 and 44, built from $GITHUB_SHA. Verify: rpmkeys --import RPM-GPG-KEY-doctor-nox && rpmkeys --checksig <rpm>; sha256sum -c SHA256SUMS (signed: SHA256SUMS.asc). Draft until reviewed and published by hand." \
-            ./*
+            --title "Doctor NoX $INPUT_VERSION" --notes-file ../release-notes.md ./*
           echo "::notice title=Draft release::v$INPUT_VERSION created as a draft; review and publish it by hand"

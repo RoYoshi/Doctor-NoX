@@ -917,11 +917,15 @@ class Window(QMainWindow):
         except Exception:
             qt = "PySide6"
         t = self.theme
+        from . import flatpak
+        sandboxed = ("<p>This is the Flatpak: its checks run on this computer through the "
+                     "org.freedesktop.Flatpak permission, not inside the sandbox.</p>"
+                     if flatpak.sandbox_app_path() else "")
         text = (f"<h3 style='margin-bottom:4px'>Doctor NoX {VERSION}</h3>"
                 f"<p>Read-only system health checks for Linux: Fedora (including Atomic and bootc), "
                 f"Debian and Ubuntu, Arch and openSUSE, with general checks everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. "
-                f"Reports are written only where you choose.</p>"
+                f"Reports are written only where you choose.</p>{sandboxed}"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION} · {qt} · "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)

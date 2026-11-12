@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
 import queue
 import threading
 import time
@@ -33,6 +34,12 @@ def scan(ctx: Context | None = None, *, progress: Progress | None = None,
          probes=None, workers: int = 4) -> dict:
     """Return a report dict. Never raises for probe failures; never mutates the host."""
     ctx = ctx or Context()
+    if probes is None and ctx.root == Path("/"):
+        # Doctor's own Flatpak: the sandbox is not the computer, so the scan runs on the host.
+        from . import flatpak
+        app_path = flatpak.sandbox_app_path()
+        if app_path:
+            return flatpak.scan_on_host(ctx, app_path, progress=progress, deadline=deadline, selected=selected)
     all_probes = probes if probes is not None else probe_pkg.load_all()
     chosen = [p for p in all_probes if not selected or p.id in selected or p.category in selected]
     todo, skipped = applicable(ctx, chosen)

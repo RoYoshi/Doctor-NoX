@@ -103,12 +103,20 @@ only where you choose, readable only by you (mode 0600).
 
 ## Install
 
-| System | How |
+Every [release](https://github.com/RoYoshi/Doctor-NoX/releases/latest) has a
+package for each supported system, all listed in a signed `SHA256SUMS`:
+
+| System | File |
 |---|---|
-| Fedora 44 and 45 | the signed RPM from the [latest release](https://github.com/RoYoshi/Doctor-NoX/releases/latest) (below) |
+| Fedora 44 and 45 | `doctor-nox-…fc45.noarch.rpm` / `…fc44.noarch.rpm` (signed) |
+| openSUSE Tumbleweed | `doctor-nox-…opensuse.noarch.rpm` (signed) |
+| Debian 13, Ubuntu 24.04 and later | `doctor-nox_…_all.deb` |
+| Arch Linux | `doctor-nox-…-any.pkg.tar.zst`, or build `packaging/arch/PKGBUILD` (the AUR recipe) |
+| Any Linux with Python 3.10+ | the wheel: `pipx install doctor_nox-…whl` (`…whl[gui]` for the window) |
 | FE-XicoOS | included: every image installs a pinned, signed release |
-| openSUSE Tumbleweed, Debian 13, Ubuntu 24.04 and later, Arch | build the package from this repository (below); every commit's CI builds and tests them too |
-| Any Linux | `pipx install doctor-nox` once it is on PyPI (`pipx install 'doctor-nox[gui]'` for the window) |
+
+A Flatpak (below) is built and tested on every commit too. PyPI, AUR and
+Flathub listings are not set up yet ([docs/RELEASING.md](docs/RELEASING.md)).
 
 **Fedora:** download the RPM for your release and `RPM-GPG-KEY-doctor-nox`.
 Check the key, then install:
@@ -139,6 +147,26 @@ nvidia-smi, flatpak…) are optional: a check whose tool is missing reports
 
 **From the source tree**, without installing: `python3 -m doctor_nox --summary`.
 
+### The Flatpak
+
+Inside a Flatpak sandbox Doctor would see only the Flatpak runtime and its own
+private folders, not your computer. So the Flatpak runs Doctor's checks
+**on the host**: it starts its own command line there with
+`flatpak-spawn --host`, using your system's `/usr/bin/python3` (3.10 or later)
+and the code in the app's folder, and shows that report. The host run is the
+same read-only scan as a native install's; nothing in it needs root.
+
+This needs the `org.freedesktop.Flatpak` permission, which lets an app run
+programs outside its sandbox, so what keeps the Flatpak read-only is Doctor's
+own code, not the sandbox. If you turn the permission off (Flatseal, your
+desktop's app permissions), or the host has no Python 3.10, Doctor says so in
+one finding instead of reporting on the sandbox.
+
+```bash
+flatpak-builder --user --install --force-clean flatpak-build packaging/flatpak/io.github.royoshi.doctornox.yml
+flatpak run io.github.royoshi.doctornox
+```
+
 ## Development
 
 Python 3 with PySide6 (Qt Widgets); the logic is Qt-free and tested without a
@@ -161,18 +189,22 @@ command answer is faked through the real allowlist.
 | `bin/doctor-nox` | launcher for the RPM layout and source checkouts |
 | `data/` | desktop entry, AppStream metadata, icons, report schema |
 | `pyproject.toml` | Python package (pip, pipx; the Debian and Arch packages build from it) |
-| `packaging/` | RPM spec, `debian/`, Arch `PKGBUILD`, build scripts, CI checks |
+| `packaging/` | RPM spec, `debian/`, Arch `PKGBUILD`, Flatpak manifest, build scripts, CI checks |
 
 CI (`.github/workflows/ci.yml`) builds and installs the package on Fedora 45
 and 44, openSUSE Tumbleweed, Debian 13, Ubuntu 26.04 and 24.04, and Arch, plus
-the wheel with pipx. Each installed package then runs the command line and the
-GUI tests as an unprivileged user and is compared with the source tree.
+the wheel with pipx and the Flatpak. Each installed package then runs the
+command line and the GUI tests as an unprivileged user and is compared with the
+source tree; the Flatpak also scans its host through `flatpak-spawn --host`.
+The tests also run on Python 3.10, the oldest supported.
 
 ## Releases
 
-Fedora releases are signed RPMs, made by hand through a protected workflow and
-published only after review. [docs/RELEASING.md](docs/RELEASING.md) covers
-versioning, signing, verification, and what the other formats still need.
+Releases are made by hand through a protected workflow and published only after
+review: signed RPMs for Fedora and openSUSE, the .deb, the Arch package and the
+Python wheel and sdist, all in a signed `SHA256SUMS`.
+[docs/RELEASING.md](docs/RELEASING.md) covers versioning, signing, verification,
+and what PyPI, the AUR and Flathub still need.
 
 Signing key: `D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55`
 ([`packaging/RPM-GPG-KEY-doctor-nox`](packaging/RPM-GPG-KEY-doctor-nox)).

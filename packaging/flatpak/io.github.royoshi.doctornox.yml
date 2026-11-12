@@ -1,0 +1,62 @@
+# Doctor NoX as a Flatpak, built from this checkout:
+#
+#   flatpak-builder --user --install --force-clean flatpak-build packaging/flatpak/io.github.royoshi.doctornox.yml
+#
+# The checks run on the host. Inside the sandbox Doctor would see only the
+# runtime and its own private folders, not the computer it is meant to check,
+# so the app starts Doctor's command line on the host with
+# `flatpak-spawn --host` (the org.freedesktop.Flatpak permission below), using
+# the host's /usr/bin/python3 (3.10 or later) and the code in this app's
+# folder, and shows that report (doctor_nox/flatpak.py, doctor_nox/hostrun.py).
+# The host run is the same read-only scan as a native install's.
+#
+# A Flathub submission would replace the `dir` source with the release's git
+# tag and commit; see docs/RELEASING.md.
+id: io.github.royoshi.doctornox
+runtime: org.kde.Platform
+runtime-version: '6.10'
+sdk: org.kde.Sdk
+base: io.qt.PySide.BaseApp
+base-version: '6.10'
+command: doctor-nox
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Runs Doctor's read-only checks on the host with flatpak-spawn --host.
+  - --talk-name=org.freedesktop.Flatpak
+build-options:
+  env:
+    # Doctor uses Qt Widgets only.
+    - BASEAPP_REMOVE_WEBENGINE=1
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+modules:
+  - name: doctor-nox
+    buildsystem: simple
+    build-commands:
+      - install -d /app/share/doctor-nox
+      - cp -r doctor_nox /app/share/doctor-nox/
+      - find /app/share/doctor-nox -name __pycache__ -prune -exec rm -rf {} +
+      - find /app/share/doctor-nox -type d -exec chmod 0755 {} +
+      - find /app/share/doctor-nox -type f -exec chmod 0644 {} +
+      - python3 -m compileall -q /app/share/doctor-nox/doctor_nox
+      - install -Dm0755 bin/doctor-nox /app/bin/doctor-nox
+      - install -Dm0644 data/io.github.royoshi.doctornox.desktop /app/share/applications/io.github.royoshi.doctornox.desktop
+      - install -Dm0644 data/io.github.royoshi.doctornox.metainfo.xml /app/share/metainfo/io.github.royoshi.doctornox.metainfo.xml
+      - install -Dm0644 data/doctor-nox-report.schema.json /app/share/doctor-nox/doctor-nox-report.schema.json
+      - install -Dm0644 LICENSE /app/share/licenses/io.github.royoshi.doctornox/LICENSE
+      - |
+        for size in 16 22 24 32 48 64 128 256 512; do
+          install -Dm0644 "data/icons/hicolor/${size}x${size}/apps/io.github.royoshi.doctornox.png" \
+            "/app/share/icons/hicolor/${size}x${size}/apps/io.github.royoshi.doctornox.png"
+        done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - dist
+          - flatpak-build
+          - flatpak-repo
+          - .flatpak-builder

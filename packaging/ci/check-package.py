@@ -12,8 +12,8 @@ import subprocess
 import sys
 
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
-MODULES = ("__init__", "__main__", "cli", "context", "distro", "engine", "gui", "model", "report", "runner",
-           "theme", "viewmodel")
+MODULES = ("__init__", "__main__", "cli", "context", "distro", "engine", "flatpak", "gui", "hostrun", "model",
+           "report", "runner", "theme", "viewmodel")
 PROBES = ("__init__", "hardware", "logs", "network", "security", "software", "storage", "system", "updates")
 EXPECTED = {
     "/usr/bin/doctor-nox",

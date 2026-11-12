@@ -68,10 +68,16 @@ def main(argv=None) -> int:
             return gui.screenshots(args.gui_screenshot)
         return gui.run()
 
-    from . import engine, probes, report
+    from . import engine, flatpak, probes, report
     from .context import Context
     if args.list_checks:
         ctx = Context()
+        app_path = flatpak.sandbox_app_path()
+        if app_path:  # Doctor's own Flatpak: list what applies to the computer, not the sandbox
+            code, out, err = flatpak.list_checks_on_host(ctx, app_path)
+            sys.stdout.write(out)
+            sys.stderr.write(err)
+            return code
         todo, skipped = engine.applicable(ctx, probes.load_all())
         print(f"# {ctx.platform.describe()}")
         for p in todo:

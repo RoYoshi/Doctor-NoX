@@ -236,6 +236,20 @@ class BootcTests(Base):
         f = self.scan(bootc_host(booted=bootc_entry("44.1", "b", incompatible=True)))
         self.assertEqual(f["system.image.booted"].severity, "warn")
 
+    def test_timestamps_parse_on_every_supported_python(self):
+        """bootc prints up to nine fractional digits and "Z"; Python 3.10 takes neither as is."""
+        utc = datetime.timezone.utc
+        expect = {
+            "2026-10-28T04:00:00Z": datetime.datetime(2026, 10, 28, 4, 0, 0, tzinfo=utc),
+            "2026-10-28T04:00:00.123456789Z": datetime.datetime(2026, 10, 28, 4, 0, 0, 123456, tzinfo=utc),
+            "2026-10-28T04:00:00.5z": datetime.datetime(2026, 10, 28, 4, 0, 0, 500000, tzinfo=utc),
+            "2026-10-28T06:00:00.1234+02:00": datetime.datetime(2026, 10, 28, 4, 0, 0, 123400, tzinfo=utc),
+        }
+        for text, when in expect.items():
+            self.assertEqual(system._iso(text), when, text)
+        for bad in ("2026-10-28T04:00:00", "not a date", "", None, 1793404800):
+            self.assertIsNone(system._iso(bad), bad)
+
     def test_malformed_bootc_falls_back_to_rpm_ostree_then_unknown(self):
         for payload in ("not json", json.dumps({"apiVersion": "org.containers.bootc/v2"}),
                         json.dumps({"apiVersion": "org.containers.bootc/v1", "status": {"booted": None}}),

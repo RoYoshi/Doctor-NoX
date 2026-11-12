@@ -50,7 +50,15 @@ class FakeRunner:
 
     def run(self, name, *args, timeout=None):
         runner_mod.validate(name, args)  # raises CommandNotAllowed exactly like the real runner
-        key = (name, *args)
+        return self._answer((name, *args))
+
+    def run_host_doctor(self, script, args, timeout, resolve=None):
+        """The Flatpak build's host run, answered from the key ("host-doctor", *args)."""
+        runner_mod.validate_host_doctor(script, args)
+        self.scripts = getattr(self, "scripts", []) + [script]
+        return self._answer(("host-doctor", *args))
+
+    def _answer(self, key):
         self.calls.append(key)
         answer = self.answers.get(key)
         if answer is None:

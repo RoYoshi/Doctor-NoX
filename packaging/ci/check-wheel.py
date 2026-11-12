@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from doctor_nox import VERSION  # noqa: E402
 
 ICON_SIZES = (16, 22, 24, 32, 48, 64, 128, 256, 512)
-MODULES = ("__init__", "__main__", "cli", "context", "distro", "engine", "gui", "model", "report", "runner",
-           "theme", "viewmodel")
+MODULES = ("__init__", "__main__", "cli", "context", "distro", "engine", "flatpak", "gui", "hostrun", "model",
+           "report", "runner", "theme", "viewmodel")
 PROBES = ("__init__", "hardware", "logs", "network", "security", "software", "storage", "system", "updates")
 DATA = f"doctor_nox-{VERSION}.data/data/share"
 EXPECTED = {
