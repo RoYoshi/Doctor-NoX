@@ -14,7 +14,11 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildArch:      noarch
 
+%if 0%{?suse_version}
 %global doctor_pyver %(%{__python3} -c 'import sys; print("%%d.%%d" %% sys.version_info[:2])')
+%else
+%global doctor_pyver %{python3_version}
+%endif
 
 %if 0%{?suse_version}
 BuildRequires:  python-rpm-macros
@@ -36,8 +40,8 @@ Requires:       %{?primary_python}%{!?primary_python:python3}-pyside6
 Requires:       python3-pyside6
 %endif
 Requires:       hicolor-icon-theme
-# The shipped bytecode is for this distribution's Python. Worked out here
-# because Fedora and openSUSE define different Python macros.
+# The shipped bytecode is for this distribution's Python (doctor_pyver: Fedora's
+# python3_version; openSUSE asks the interpreter).
 Requires:       python(abi) = %{doctor_pyver}
 
 # Doctor NoX was called FE-Xico Doctor (package fe-xico-doctor) up to 1.0.0.
