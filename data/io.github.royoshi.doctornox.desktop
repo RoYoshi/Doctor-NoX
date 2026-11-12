@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Doctor NoX
+GenericName=System Health Diagnostics
+Comment=Read-only checks for bootc deployments, updates, services, drivers, controllers, storage and network
+Exec=doctor-nox
+Icon=io.github.royoshi.doctornox
+Terminal=false
+Categories=System;Monitor;
+Keywords=FE-Xico;Doctor;NoX;Health;Diagnostics;bootc;Updates;SELinux;NVIDIA;xpad;Controller;Flatpak;
+StartupNotify=true
+StartupWMClass=doctor-nox
+X-KDE-StartupNotify=true

@@ -1,0 +1,160 @@
+# Doctor NoX release: builds the RPMs for Fedora 45 and 44 from one commit,
+# signs them with the project's RPM signing key, verifies them against the
+# public key committed in this repository, installs and tests each one with
+# Fedora's signature enforcement on, and creates a DRAFT GitHub release.
+#
+# Runs only when started by hand (workflow_dispatch) and only through the
+# "doctor-release" environment, which should require a reviewer (docs/RELEASING.md).
+# Nothing is published until the draft release is reviewed and published by
+# hand. A successful build alone never makes a release usable.
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release; must equal the VERSION file (X.Y.Z)"
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  build:
+    name: Build, sign and test (Fedora ${{ matrix.fedora }})
+    runs-on: ubuntu-24.04
+    container: fedora:${{ matrix.fedora }}
+    environment: doctor-release
+    timeout-minutes: 40
+    strategy:
+      fail-fast: true
+      matrix:
+        fedora: [45, 44]
+    steps:
+      - name: Bootstrap Git
+        run: dnf5 -y install --setopt=install_weak_deps=False git-core
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install build and test tools
+        run: |
+          dnf5 -y install --setopt=install_weak_deps=False \
+            rpm-build rpm-sign python3-devel desktop-file-utils gnupg2 \
+            python3-pyside6 python3-jsonschema dejavu-sans-fonts util-linux shadow-utils procps-ng hostname
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Check the version and the signing key
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          SIGNING_KEY: ${{ secrets.DOCTOR_RPM_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          [ "$INPUT_VERSION" = "$version" ] || { echo "::error title=Version::input $INPUT_VERSION != VERSION $version"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error title=Version::tag v$version already exists; bump VERSION and the spec first"; exit 1
+          fi
+          [ -n "$SIGNING_KEY" ] || { echo "::error title=Signing key::secret DOCTOR_RPM_SIGNING_KEY is not set (docs/RELEASING.md)"; exit 1; }
+          test -s packaging/RPM-GPG-KEY-doctor-nox || { echo "::error title=Signing key::packaging/RPM-GPG-KEY-doctor-nox is not committed"; exit 1; }
+          pinned="$(tr -d '[:space:]' < packaging/signing-key.fingerprint)"
+          public="$(gpg --show-keys --with-colons packaging/RPM-GPG-KEY-doctor-nox | awk -F: '/^fpr/ {print $10; exit}')"
+          [ "$public" = "$pinned" ] || { echo "::error title=Signing key::committed public key $public != pinned fingerprint $pinned"; exit 1; }
+          echo "::notice title=Signing key::public key fingerprint $public matches packaging/signing-key.fingerprint"
+      - name: Source tests
+        run: QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+      - name: Build
+        run: packaging/build-rpm.sh
+      - name: Sign and verify against the committed public key
+        env:
+          SIGNING_KEY: ${{ secrets.DOCTOR_RPM_SIGNING_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.DOCTOR_RPM_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$(mktemp -d)"; chmod 0700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          pinned="$(tr -d '[:space:]' < packaging/signing-key.fingerprint)"
+          gpg --with-colons --list-secret-keys "$pinned" >/dev/null \
+            || { echo "::error title=Signing key::the secret key is not the pinned key $pinned"; exit 1; }
+          printf '%s' "$SIGNING_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          for rpm in dist/*.rpm; do
+            rpmsign --define "_gpg_name $pinned" \
+              --define "_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase-file $GNUPGHOME/passphrase" \
+              --addsign "$rpm"
+          done
+          # Verify with rpm's own keyring, holding only the committed public key.
+          rpmkeys --import packaging/RPM-GPG-KEY-doctor-nox
+          for rpm in dist/*.rpm; do
+            verify="$(rpmkeys --checksig "$rpm")"; echo "$verify"
+            grep -Eq 'signatures.* OK$' <<<"$verify" || { echo "::error title=Signature::$verify"; exit 1; }
+          done
+          rm -rf "$GNUPGHOME"
+      - name: Install with signature enforcement on and test as an unprivileged user
+        run: |
+          dnf5 -y install dist/doctor-nox-*.noarch.rpm
+          bash packaging/ci/check-installed.sh "$GITHUB_WORKSPACE"
+      - name: Checksums and provenance record
+        env:
+          FEDORA: ${{ matrix.fedora }}
+        run: |
+          set -euo pipefail
+          cd dist
+          rpm=$(ls doctor-nox-*.noarch.rpm); srpm=$(ls doctor-nox-*.src.rpm)
+          python3 -I - "$rpm" "$srpm" <<'PY'
+          import hashlib, json, os, subprocess, sys
+          def sha(p): return hashlib.sha256(open(p, "rb").read()).hexdigest()
+          def q(p, f): return subprocess.run(["rpm", "-qp", "--qf", f, p], check=True, capture_output=True, text=True).stdout
+          rpm, srpm = sys.argv[1:3]
+          record = {
+              "package": q(rpm, "%{NAME}"), "version": q(rpm, "%{VERSION}"), "release": q(rpm, "%{RELEASE}"),
+              "arch": q(rpm, "%{ARCH}"), "fedora": int(os.environ["FEDORA"]),
+              "rpm": {"file": rpm, "sha256": sha(rpm)}, "srpm": {"file": srpm, "sha256": sha(srpm)},
+              "signature": q(rpm, "%{RSAHEADER:pgpsig}"),
+              "signing_key_fingerprint": open("../packaging/signing-key.fingerprint").read().strip(),
+              "source": {"repository": os.environ["GITHUB_REPOSITORY"], "commit": os.environ["GITHUB_SHA"]},
+              "build": {"workflow_run": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+                        "runner": "GitHub-hosted ubuntu-24.04, container fedora:" + os.environ["FEDORA"]},
+          }
+          json.dump(record, open(f"{rpm}.provenance.json", "w"), indent=2, sort_keys=True)
+          print(f"::notice title=Built {rpm}::sha256 {record['rpm']['sha256']}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-fedora-${{ matrix.fedora }}
+          path: dist/*.rpm*
+          if-no-files-found: error
+
+  draft-release:
+    name: Draft GitHub release (not published)
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: doctor-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Sign the checksum list and create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING_KEY: ${{ secrets.DOCTOR_RPM_SIGNING_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.DOCTOR_RPM_SIGNING_PASSPHRASE }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum *.rpm > SHA256SUMS
+          export GNUPGHOME="$(mktemp -d)"; chmod 0700 "$GNUPGHOME"
+          printf '%s\n' "$SIGNING_KEY" | gpg --batch --import
+          pinned="$(tr -d '[:space:]' < ../packaging/signing-key.fingerprint)"
+          printf '%s' "$SIGNING_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          gpg --batch --pinentry-mode loopback --passphrase-file "$GNUPGHOME/passphrase" -u "$pinned" --armor --detach-sign SHA256SUMS
+          rm -rf "$GNUPGHOME"
+          cp ../packaging/RPM-GPG-KEY-doctor-nox .
+          ls -l
+          gh release create "v$INPUT_VERSION" --draft --target "$GITHUB_SHA" \
+            --title "Doctor NoX $INPUT_VERSION" \
+            --notes "Signed noarch RPMs for Fedora 45 and 44, built from $GITHUB_SHA. Verify: rpmkeys --import RPM-GPG-KEY-doctor-nox && rpmkeys --checksig <rpm>; sha256sum -c SHA256SUMS (signed: SHA256SUMS.asc). Draft until reviewed and published by hand." \
+            ./*
+          echo "::notice title=Draft release::v$INPUT_VERSION created as a draft; review and publish it by hand"

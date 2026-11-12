@@ -1,0 +1,7 @@
+# rpmlint filters for doctor-nox. Each one is a deliberate choice:
+# Doctor NoX documents its CLI in --help and docs/DOCTOR_NOX.md; no man page yet.
+addFilter("no-manual-page-for-binary")
+# "bootc" is the name of the tool Doctor NoX inspects, not a misspelling.
+addFilter("spelling-error \('bootc'")
+# Source0 is built locally from `git archive` by packaging/build-rpm.sh.
+addFilter("invalid-url Source0:")

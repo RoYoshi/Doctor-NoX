@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Doctor NoX report",
+  "description": "Point-in-time, read-only FE-XicoOS diagnostics. schema_version increments on incompatible changes.",
+  "type": "object",
+  "required": ["schema", "schema_version", "doctor_version", "generated_at", "duration_ms", "complete",
+               "redacted", "host", "overall", "totals", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "doctor-nox/report"},
+    "schema_version": {"const": 2},
+    "doctor_version": {"type": "string"},
+    "generated_at": {"type": "string", "description": "UTC ISO-8601 timestamp of the snapshot"},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "complete": {"type": "boolean", "description": "false when the scan was cancelled or hit its deadline"},
+    "redacted": {"type": "boolean", "description": "true for the best-effort redacted sharing report"},
+    "host": {
+      "type": "object",
+      "required": ["name", "edition", "version", "kernel", "image_variant"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "edition": {"type": "string"},
+        "version": {"type": "string"},
+        "kernel": {"type": "string"},
+        "image_variant": {"type": "string"}
+      }
+    },
+    "overall": {"$ref": "#/$defs/severity"},
+    "totals": {
+      "type": "object",
+      "required": ["pass", "info", "warn", "error", "unknown"],
+      "additionalProperties": false,
+      "properties": {
+        "pass": {"type": "integer", "minimum": 0},
+        "info": {"type": "integer", "minimum": 0},
+        "warn": {"type": "integer", "minimum": 0},
+        "error": {"type": "integer", "minimum": 0},
+        "unknown": {"type": "integer", "minimum": 0}
+      }
+    },
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "severity": {"enum": ["error", "warn", "unknown", "info", "pass"]},
+    "finding": {
+      "type": "object",
+      "required": ["id", "category", "title", "severity", "summary", "evidence", "reason", "guidance"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"},
+        "category": {"enum": ["system", "updates", "security", "hardware", "storage", "software", "network", "logs"]},
+        "title": {"type": "string", "maxLength": 80},
+        "severity": {"$ref": "#/$defs/severity"},
+        "summary": {"type": "string", "maxLength": 200},
+        "evidence": {"type": "array", "maxItems": 60, "items": {"type": "string", "maxLength": 400}},
+        "reason": {"type": "string", "maxLength": 400},
+        "guidance": {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 400}}
+      }
+    }
+  }
+}
