@@ -104,13 +104,14 @@ jobs:
     steps:
       - name: Bootstrap Git
         timeout-minutes: 5
-        run: zypper --non-interactive install --no-recommends git-core tar gzip
+        # The container's awk is busybox's; desktop-file-utils needs GNU awk, which replaces it.
+        run: zypper --non-interactive install --no-recommends --force-resolution git-core tar gzip gawk
       - uses: actions/checkout@v4
       - name: Install build and test tools
         timeout-minutes: 15
         run: |
-          zypper --non-interactive install --no-recommends python3 rpm-build python-rpm-macros desktop-file-utils \
-            dejavu-fonts util-linux shadow procps findutils
+          zypper --non-interactive install --no-recommends --force-resolution python3 rpm-build python-rpm-macros \
+            desktop-file-utils dejavu-fonts util-linux shadow procps findutils
           # openSUSE names Python modules by interpreter flavour (python313-pyside6).
           py="$(python3 -c 'import sys; print(f"python{sys.version_info[0]}{sys.version_info[1]}")')"
           zypper --non-interactive install --no-recommends "$py-pyside6" "$py-jsonschema"
@@ -161,7 +162,8 @@ jobs:
       - name: Install build and test tools
         timeout-minutes: 15
         run: |
-          apt-get install -y --no-install-recommends dpkg-dev debhelper dh-python pybuild-plugin-pyproject \
+          # build-essential: dpkg-buildpackage requires it for every package, even arch: all.
+          apt-get install -y --no-install-recommends build-essential dpkg-dev debhelper dh-python pybuild-plugin-pyproject \
             python3-all python3-hatchling python3-jsonschema desktop-file-utils appstream hicolor-icon-theme \
             fonts-dejavu-core procps util-linux passwd
           if [ "${{ matrix.gui }}" = true ]; then

@@ -1211,7 +1211,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
               f"{mode} theme applied to stylesheet and palette")
         shot = window.grab()  # paints the header, chips, sidebar pills, status pills and details
         check(not shot.isNull() and shot.width() > 0, f"{mode} theme renders")
-        check("Legacy auto-reboot timer" in window.details.toPlainText(), f"{mode} theme keeps the selection")
+        check("Package database" in window.details.toPlainText(), f"{mode} theme keeps the selection")
     window.set_theme_mode("system")
     app.processEvents()
     check(window.theme in (themes.LIGHT_THEME, themes.DARK_THEME) and not window.grab().isNull(),

@@ -125,7 +125,7 @@ sudo dnf install ./doctor-nox-1.0.0-1.fc45.noarch.rpm
 
 ```bash
 packaging/build-rpm.sh     # Fedora, openSUSE: needs rpm-build and python3-devel (Fedora) or python-rpm-macros (openSUSE)
-packaging/build-deb.sh     # Debian, Ubuntu: needs debhelper dh-python pybuild-plugin-pyproject python3-hatchling
+packaging/build-deb.sh     # Debian, Ubuntu: needs build-essential debhelper dh-python pybuild-plugin-pyproject python3-hatchling
 packaging/build-arch.sh    # Arch, as a normal user: needs base-devel python-build python-installer python-hatchling
 ```
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the Doctor NoX .deb (Debian 13+, Ubuntu 24.04+) from a clean Git tree.
-# Output: dist/doctor-nox_VERSION_all.deb. Needs dpkg-dev, debhelper, dh-python,
-# pybuild-plugin-pyproject, python3-hatchling and desktop-file-utils.
+# Output: dist/doctor-nox_VERSION_all.deb. Needs build-essential, debhelper,
+# dh-python, pybuild-plugin-pyproject, python3-hatchling and desktop-file-utils.
 #
 #   packaging/build-deb.sh [--allow-dirty]
 #
