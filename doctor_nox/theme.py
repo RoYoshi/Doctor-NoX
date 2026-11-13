@@ -22,6 +22,7 @@ Design rules
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 import os
 
 from .model import ERROR, INFO, PASS, UNKNOWN, WARN
@@ -108,18 +109,23 @@ THEMES = {DARK: DARK_THEME, LIGHT: LIGHT_THEME}
 # ── The NoX mark: a crescent moon cradling a medical cross ──
 # Geometry on a 100-unit grid, shared by the window (gui.nox_mark) and the app
 # icon (tools/build_doctor_icon.py), so the two never drift apart.
+#
+# Optical centring: the composition is symmetric about its diagonal, and the
+# crescent carries most of its weight low and to the left. Centring the outline
+# (shift 4) still looks low-left, and centring the weight (shift 8.6) pushes the
+# cross into the corner; shifting 6 up-right along the diagonal looks centred.
 @dataclass(frozen=True)
 class MarkGeometry:
     moon: tuple   # the moon's disc: centre x, centre y, radius
     cut: tuple    # the circle cut out of it to leave a crescent: centre x, centre y, radius
     cross: tuple  # centre x, centre y, arm length, arm thickness (corners round by a quarter of it)
-    inset: float  # on an icon tile: the grid's offset from the tile's edge, as a fraction of the tile
-    scale: float  # on an icon tile: the grid's size, as a fraction of the tile
+    tip: float    # radius that rounds the crescent's two tips, matching the cross's corners
+    scale: float  # on an icon tile: the grid's size as a fraction of the tile (centred on it)
 
 
-NOX_MARK = MarkGeometry(moon=(46, 54, 38), cut=(62, 38, 29), cross=(66, 34, 28, 10), inset=0.12, scale=0.76)
+NOX_MARK = MarkGeometry(moon=(52, 48, 38), cut=(68, 32, 29), cross=(72, 28, 28, 10), tip=1.6, scale=0.84)
 # Icons of 24 px and smaller: a larger mark, thicker crescent and bolder cross, so the cross survives.
-NOX_MARK_SMALL = MarkGeometry(moon=(46, 54, 38), cut=(62, 38, 27), cross=(66, 34, 32, 13), inset=0.06, scale=0.88)
+NOX_MARK_SMALL = MarkGeometry(moon=(51, 49, 38), cut=(67, 33, 27), cross=(71, 29, 32, 13), tip=1.6, scale=0.94)
 SMALL_ICON = 24                     # sizes up to this use NOX_MARK_SMALL
 ICON_TILE = ("#3a2f8f", "#1a1640")  # the placeholder icon's indigo night tile, top to bottom
 ICON_MARGIN = 0.03                  # transparent margin around the tile, as a fraction of the icon
@@ -128,6 +134,42 @@ ICON_RADIUS = 0.22                  # the tile's corner radius, as a fraction of
 
 def mark_for(size: int) -> MarkGeometry:
     return NOX_MARK_SMALL if size <= SMALL_ICON else NOX_MARK
+
+
+def crescent_tips(mark: MarkGeometry, reach: float = 20.0, overlap: float = 2.0):
+    """How to round the crescent's two sharp tips, as (fillet centre, cut-away quad) per tip.
+
+    The rounded crescent is: the moon's disc, minus the cut-out disc, minus each cut-away quad,
+    plus each fillet disc (radius mark.tip). The fillet touches the moon's edge from inside and
+    the cut-out's edge from outside; the quad covers everything beyond the line between those two
+    touching points, on the side of the sharp tip.
+    """
+    (mx, my, big), (cx, cy, small), rho = mark.moon, mark.cut, mark.tip
+    d = math.hypot(cx - mx, cy - my)
+    ux, uy = (cx - mx) / d, (cy - my) / d
+
+    def meet(r1, r2):  # where the circle (moon centre, r1) crosses the circle (cut centre, r2)
+        a = (r1 * r1 - r2 * r2 + d * d) / (2 * d)
+        h = math.sqrt(max(0.0, r1 * r1 - a * a))
+        px, py = mx + a * ux, my + a * uy
+        return (px - h * uy, py + h * ux), (px + h * uy, py - h * ux)
+
+    tips = []
+    for (fx, fy), (tx, ty) in zip(meet(big - rho, small + rho), meet(big, small)):
+        fm, fc = math.hypot(fx - mx, fy - my), math.hypot(fx - cx, fy - cy)
+        ax, ay = mx + (fx - mx) / fm * big, my + (fy - my) / fm * big       # touches the moon's edge
+        bx, by = cx + (fx - cx) / fc * small, cy + (fy - cy) / fc * small   # touches the cut-out's edge
+        lx, ly = (bx - ax), (by - ay)
+        length = math.hypot(lx, ly)
+        lx, ly = lx / length, ly / length
+        nx, ny = ly, -lx                                                    # normal, towards the tip
+        if (tx - ax) * nx + (ty - ay) * ny < 0:
+            nx, ny = -nx, -ny
+        a0 = (ax - lx * overlap, ay - ly * overlap)
+        b0 = (bx + lx * overlap, by + ly * overlap)
+        quad = (a0, b0, (b0[0] + nx * reach, b0[1] + ny * reach), (a0[0] + nx * reach, a0[1] + ny * reach))
+        tips.append(((fx, fy), quad))
+    return tips
 
 
 def status_count(severity: str, n: int) -> str:

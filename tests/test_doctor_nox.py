@@ -522,8 +522,24 @@ class ThemeTests(unittest.TestCase):
                     for dy in (-half_h, half_h):
                         self.assertLess(((x + dx - cx) ** 2 + (y + dy - cy) ** 2) ** 0.5, cr, mark)
             mx, my, mr = mark.moon
-            self.assertTrue(0 <= mx - mr and mx + mr <= 100 and 0 <= my - mr and my + mr <= 100, "moon on the grid")
-            self.assertLessEqual(mark.inset * 2 + mark.scale, 1.0 + 1e-9, "the mark stays on its tile")
+            # Symmetric about its diagonal: the moon, the cut-out and the cross lie on one 45-degree line.
+            for px, py in (mark.cut[:2], mark.cross[:2]):
+                self.assertAlmostEqual(px - mx, -(py - my), msg=mark)
+            # Optically centred: the outline sits just up-right of the grid's centre (the crescent's
+            # weight sits down-left), and the mark keeps clear of the grid's edges.
+            left, right = mx - mr, max(mx + mr, x + length / 2)
+            top, bottom = min(my - mr, y - length / 2), my + mr
+            centre_x, centre_y = (left + right) / 2, (top + bottom) / 2
+            self.assertTrue(0 < centre_x - 50 <= 3 and 0 < 50 - centre_y <= 3, (mark, centre_x, centre_y))
+            self.assertGreaterEqual(min(left, top, 100 - right, 100 - bottom), 8, mark)
+            self.assertLessEqual(mark.scale, 1.0)
+            # Rounded tips: each fillet touches the moon's edge from inside and the cut-out's from outside.
+            tips = theme.crescent_tips(mark)
+            self.assertEqual(len(tips), 2)
+            for (fx, fy), quad in tips:
+                self.assertAlmostEqual(((fx - mx) ** 2 + (fy - my) ** 2) ** 0.5, mr - mark.tip, places=6)
+                self.assertAlmostEqual(((fx - cx) ** 2 + (fy - cy) ** 2) ** 0.5, cr + mark.tip, places=6)
+                self.assertEqual(len(quad), 4)
         self.assertIs(theme.mark_for(16), theme.NOX_MARK_SMALL)
         self.assertIs(theme.mark_for(25), theme.NOX_MARK)
         for tile in theme.ICON_TILE:  # WCAG 1.4.11: graphics at least 3:1 against what is behind them

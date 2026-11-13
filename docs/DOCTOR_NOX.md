@@ -165,10 +165,18 @@ like monitor lights. The light theme is first light: cool paper and indigo ink.
     `python3 tools/build_doctor_icon.py` (needs Pillow) from the mark's
     geometry in `theme.py`, the same geometry the window uses. Sizes up to
     24 px use a larger, bolder mark so the cross survives.
+  - The mark is optically centred: the tile's centre sits midway between the
+    mark's outline centre and its centre of mass (1.4% of the tile each way,
+    along its diagonal). It fills 63% of the tile, and the crescent's tips are
+    rounded to match the cross's corners.
+  - The tile's margin and the cross's arms land on whole pixels at every size,
+    with arms of equal parity so the cross stays symmetric. From 48 px up a
+    faint moonglow and a faint light along the top edge add depth; smaller
+    sizes stay flat.
   - The earlier icon, RoYoshi's magenta medical badge, is in the repository
     history: `git show bb6ae57:tools/doctor-nox-icon-source.png > badge.png`.
-  - If the icon is missing, the window draws the same icon itself. There is
-    never a generic or Tux fallback.
+  - If the icon is missing, the window draws the same icon itself, without
+    the glow and edge light. There is never a generic or Tux fallback.
 
 ## Severity — what each level promises
 

@@ -16,7 +16,7 @@ import traceback
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
                            QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
-                           QPen, QPixmap, QShortcut)
+                           QPen, QPixmap, QPolygonF, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
@@ -63,8 +63,9 @@ def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPi
     """The NoX mark: a crescent moon (accent) cradling a medical cross (text colour).
 
     Drawn from theme.py's geometry, so it is sharp at any size and needs no file. With
-    tile=True it is the placeholder app icon exactly as tools/build_doctor_icon.py draws it:
-    on the indigo night tile, with the bolder mark at small sizes.
+    tile=True it is the placeholder app icon as tools/build_doctor_icon.py draws it, on the
+    indigo night tile with the bolder mark at small sizes, but without the faint glow and edge
+    light the tool adds from 48 px up.
     """
     pix = QPixmap(max(1, round(size * ratio)), max(1, round(size * ratio)))
     pix.setDevicePixelRatio(ratio)
@@ -83,15 +84,24 @@ def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPi
         painter.setBrush(QBrush(gradient))
         corner = themes.ICON_RADIUS * side
         painter.drawRoundedRect(QRectF(edge, edge, side, side), corner, corner)
-        painter.translate(edge + mark.inset * side, edge + mark.inset * side)
+        offset = edge + (1 - mark.scale) / 2 * side
+        painter.translate(offset, offset)
         painter.scale(mark.scale * side / 100, mark.scale * side / 100)
     (mx, my, mr), (cx, cy, cr), (x, y, length, thick) = mark.moon, mark.cut, mark.cross
     moon = QPainterPath()
     moon.addEllipse(QPointF(mx, my), mr, mr)
     cut = QPainterPath()
     cut.addEllipse(QPointF(cx, cy), cr, cr)
+    crescent = moon.subtracted(cut)
+    for (fx, fy), quad in themes.crescent_tips(mark):  # round both tips
+        beyond = QPainterPath()
+        beyond.addPolygon(QPolygonF([QPointF(px, py) for px, py in quad]))
+        beyond.closeSubpath()
+        fillet = QPainterPath()
+        fillet.addEllipse(QPointF(fx, fy), mark.tip, mark.tip)
+        crescent = crescent.subtracted(beyond).united(fillet)
     painter.setBrush(QColor(t.accent))
-    painter.drawPath(moon.subtracted(cut))
+    painter.drawPath(crescent)
     painter.setBrush(QColor(t.text))
     for arm in (QRectF(x - thick / 2, y - length / 2, thick, length), QRectF(x - length / 2, y - thick / 2, length, thick)):
         painter.drawRoundedRect(arm, thick / 4, thick / 4)
