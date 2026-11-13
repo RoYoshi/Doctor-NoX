@@ -8,7 +8,7 @@ import html
 
 from .model import CATEGORIES, CATEGORY_TITLE, ERROR, INFO, PASS, SEVERITIES, SEVERITY_MEANING, UNKNOWN, WARN
 from .report import IMAGE_TEXT
-from .theme import DARK_THEME, HEADLINE, STATUS_PLURAL, STATUS_TEXT, Theme
+from .theme import DARK_THEME, HEADLINE, STATUS_TEXT, Theme, status_count
 
 OVERVIEW = "overview"
 RANK = {sev: i for i, sev in enumerate(SEVERITIES)}  # error first
@@ -40,7 +40,7 @@ def category_badge(counts, total):
 def category_accessible(title, counts, total):
     if not total:
         return f"{title}: no checks"
-    parts = [f"{counts[s]} {STATUS_PLURAL[s]}" for s in (ERROR, WARN, UNKNOWN) if counts[s]]
+    parts = [status_count(s, counts[s]) for s in (ERROR, WARN, UNKNOWN) if counts[s]]
     return f"{title}: {total} checks" + (", " + ", ".join(parts) if parts else ", all verified")
 
 
@@ -82,10 +82,21 @@ def header_text(report):
     if not report:
         return "No scan yet", ""
     h, t = report["host"], report["totals"]
-    host = " · ".join(x for x in (h.get("name", ""), IMAGE_TEXT.get(h.get("image", ""), ""),
-                                  f"kernel {h.get('kernel', '')}") if x)
-    counts = " · ".join(f"{t[s]} {STATUS_PLURAL[s]}" for s in (ERROR, WARN, UNKNOWN, INFO, PASS))
-    return host, counts
+    host = ", ".join(x for x in (h.get("name", ""), IMAGE_TEXT.get(h.get("image", ""), ""),
+                                 f"kernel {h.get('kernel', '')}") if x)
+    return host, count_summary(t)
+
+
+def count_summary(totals):
+    """'1 error, 2 warnings, 1 unknown, 4 info and 6 passed'."""
+    items = [status_count(s, totals[s]) for s in (ERROR, WARN, UNKNOWN, INFO, PASS)]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def duration_text(ms):
+    """How long a scan took, for people: '0.4 s', '1.8 s', '12 s'."""
+    seconds = max(0, ms) / 1000
+    return f"{seconds:.1f} s" if seconds < 10 else f"{seconds:.0f} s"
 
 
 def empty_state(report, scanning, category, query, severities):
@@ -113,8 +124,8 @@ def pill(severity, theme: Theme = DARK_THEME, text=None):
 
 
 def _section(title, theme):
-    return (f'<p style="color:{theme.muted};font-size:small;font-weight:600;'
-            f'margin-top:16px;margin-bottom:4px">{_e(title.upper())}</p>')
+    return (f'<p style="color:{theme.muted};font-weight:600;'
+            f'margin-top:16px;margin-bottom:4px">{_e(title)}</p>')
 
 
 def _callout(severity, body_html, theme):
@@ -127,8 +138,7 @@ def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace"):
     t = theme
     sev = finding["severity"]
     parts = [
-        (f'<p style="color:{t.muted};margin-bottom:2px">{_e(CATEGORY_TITLE[finding["category"]])}'
-         f' &nbsp;·&nbsp; <span style="font-family:\'{_e(mono)}\'">{_e(finding["id"])}</span></p>'),
+        f'<p style="color:{t.muted};margin-bottom:2px">{_e(CATEGORY_TITLE[finding["category"]])}</p>',
         f'<h2 style="color:{t.text};margin-top:0;margin-bottom:8px;font-weight:600">{_e(finding["title"])}</h2>',
         (f'<p style="margin-bottom:4px">{pill(sev, t)}&nbsp;&nbsp;'
          f'<span style="color:{t.text}">{_e(finding["summary"])}</span></p>'),
@@ -147,6 +157,9 @@ def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace"):
                      + f'<ul style="color:{t.text};margin-top:0">'
                      + "".join(f'<li style="margin-bottom:4px">{_e(g)}</li>' for g in finding["guidance"]) + "</ul>"
                      f'<p style="color:{t.muted}">Doctor is read-only: it never runs these steps for you.</p>')
+    # The check's ID, for reports and bug reports; last, because it is reference, not reading.
+    parts.append(f'<p style="color:{t.muted};margin-top:16px">Check ID&nbsp; '
+                 f'<span style="font-family:\'{_e(mono)}\'">{_e(finding["id"])}</span></p>')
     return "".join(parts)
 
 
@@ -181,7 +194,7 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME):
     incomplete = "" if report["complete"] else _callout(
         WARN, f'<span style="color:{t.status[WARN].fg};font-weight:600">Scan incomplete</span><br>'
               f'It was cancelled or timed out. Checks that did not finish are shown as Unknown.', t)
-    counts = " · ".join(f"{tot[s]} {STATUS_PLURAL[s]}" for s in (ERROR, WARN, UNKNOWN, INFO, PASS))
+    counts = count_summary(tot)
     skipped = report.get("not_applicable") or []
     not_here = ""
     if skipped:

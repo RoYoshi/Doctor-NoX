@@ -434,7 +434,7 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual([f["id"] for f in vm.visible(rep, query="is:problem")],
                          ["updates.packages", "logs.boot"])
         self.assertEqual(vm.header_text(rep)[0],
-                         "Bazzite 44 (FROM Fedora Kinoite) · image-based (OSTree) · kernel 6.17.4-300.fc44.x86_64")
+                         "Bazzite 44 (FROM Fedora Kinoite), image-based (OSTree), kernel 6.17.4-300.fc44.x86_64")
         self.assertEqual(len(vm.visible(rep, query="enp5s0 connected")), 1)
         self.assertEqual(vm.visible(rep, "network", severities=frozenset({"error"})), [])
         self.assertIn("No checks match", vm.empty_state(rep, False, "network", "", frozenset({"error"})))
@@ -462,6 +462,14 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(vm.category_badge(dict(zero, info=2, **{"pass": 3}), 5), ("OK", "pass"))
         self.assertEqual(vm.category_accessible("Logs", dict(zero, warn=2), 4), "Logs: 4 checks, 2 warnings")
         self.assertEqual(vm.category_accessible("Logs", dict(zero, **{"pass": 4}), 4), "Logs: 4 checks, all verified")
+        self.assertEqual(vm.category_accessible("Logs", dict(zero, error=1), 4), "Logs: 4 checks, 1 error")
+
+    def test_counts_and_durations_read_naturally(self):
+        totals = {"error": 1, "warn": 2, "unknown": 1, "info": 4, "pass": 6}
+        self.assertEqual(vm.count_summary(totals), "1 error, 2 warnings, 1 unknown, 4 info and 6 passed")
+        self.assertEqual(theme.status_count("warn", 1), "1 warning")
+        self.assertEqual(theme.status_count("pass", 1), "1 passed")
+        self.assertEqual([vm.duration_text(ms) for ms in (420, 1840, 12345, -5)], ["0.4 s", "1.8 s", "12 s", "0.0 s"])
 
     def test_html_uses_the_requested_theme_and_never_neon(self):
         rep = fixture_report()
@@ -497,7 +505,7 @@ class ThemeTests(unittest.TestCase):
         light, dark = theme.LIGHT_THEME, theme.DARK_THEME
         self.assertGreater(theme.luminance(light.window), 0.8)
         self.assertLess(theme.luminance(dark.window), 0.02)
-        self.assertNotEqual(dark.window, "#000000", "no OLED black: the window is a neutral dark grey")
+        self.assertNotEqual(dark.window, "#000000", "no OLED black: the window is a deep night blue")
         for t in (light, dark):
             self.assertNotIn(t.accent, {s.fg for s in t.status.values()})
             self.assertEqual(len({s.fg for s in t.status.values()}), 5, "every status has its own colour")

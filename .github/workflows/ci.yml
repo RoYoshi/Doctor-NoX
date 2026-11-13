@@ -12,6 +12,8 @@
 #   Flatpak     built with flatpak-builder on the KDE runtime and PySide BaseApp
 #               from Flathub, then run: GUI tests, a scan of the host through
 #               flatpak-spawn --host, and the permission turned off
+#   Screenshots the window in both themes from synthetic results, with Plasma's
+#               default fonts, uploaded as an artifact for design review
 # Nothing here publishes anything. Releases: release.yml.
 name: CI
 on:
@@ -347,3 +349,30 @@ jobs:
           name: doctor-nox-ci-flatpak
           path: dist/
           if-no-files-found: ignore
+
+  screenshots:
+    name: Screenshots (Fedora 45, Plasma fonts)
+    runs-on: ubuntu-24.04
+    container: fedora:45
+    timeout-minutes: 20
+    steps:
+      - name: Bootstrap Git
+        timeout-minutes: 5
+        run: dnf5 -y install --setopt=install_weak_deps=False git-core
+      - uses: actions/checkout@v4
+      - name: Install PySide6 and Plasma's default fonts (Noto Sans, Hack)
+        timeout-minutes: 15
+        run: |
+          dnf5 -y install --setopt=install_weak_deps=False \
+            python3-pyside6 google-noto-sans-fonts source-foundry-hack-fonts
+      - name: Screenshot the window in both themes (synthetic results, no scan)
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m doctor_nox --gui-screenshot screenshots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doctor-nox-screenshots
+          path: screenshots/
+          if-no-files-found: error

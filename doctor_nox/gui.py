@@ -13,10 +13,11 @@ import sys
 import tempfile
 import traceback
 
-from PySide6.QtCore import QEvent, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
-                           QGuiApplication, QIcon, QKeySequence, QPainter, QPalette, QPen, QPixmap, QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+                           QGuiApplication, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
+                           QShortcut)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem, QTextBrowser, QToolButton, QTreeWidget, QTreeWidgetItem,
@@ -35,7 +36,7 @@ NARROW = 1180  # below this width the detail pane moves under the list
 SEV_ROLE = Qt.ItemDataRole.UserRole + 1         # results table: severity key of the row
 NAV_BADGE_ROLE = Qt.ItemDataRole.UserRole + 2   # sidebar: pill text ("3", "OK", "")
 NAV_SEV_ROLE = Qt.ItemDataRole.UserRole + 3     # sidebar: pill severity ("" for none)
-SAFETY_NOTE = "Read-only  ·  No root  ·  No network requests  ·  Nothing is uploaded"
+SAFETY_NOTE = "Read-only: needs no root, makes no network requests, uploads nothing"
 QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (stylesheet parse errors fail the test)
 
 
@@ -43,7 +44,8 @@ QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (styleshee
 def app_icon() -> QIcon:
     """Doctor's badge from the icon theme or its installed file; never a generic/Tux fallback.
 
-    If neither exists, a deterministic FX glyph is drawn so the result never depends on the theme.
+    If neither exists, the NoX mark is drawn on a night tile (always the dark colours, so the
+    result never depends on the theme).
     """
     for name in ICON_NAMES:
         icon = QIcon.fromTheme(name)
@@ -54,19 +56,38 @@ def app_icon() -> QIcon:
             icon = QIcon(path)
             if not icon.isNull():
                 return icon
-    t = themes.DARK_THEME
-    pix = QPixmap(64, 64)
-    pix.fill(QColor(t.window))
+    return QIcon(nox_mark(themes.DARK_THEME, 64, tile=True))
+
+
+def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPixmap:
+    """The NoX mark: a crescent moon (accent) cradling a medical cross (text colour).
+
+    Drawn from geometry on a 100-unit grid, so it is sharp at any size and needs no file.
+    With tile=True it sits on a rounded night-coloured square, for use as an icon.
+    """
+    pix = QPixmap(max(1, round(size * ratio)), max(1, round(size * ratio)))
+    pix.setDevicePixelRatio(ratio)
+    pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
-    painter.setPen(QPen(QColor(t.accent), 2))
-    painter.drawRect(1, 1, 61, 61)
-    painter.setPen(QColor(t.text))
-    font = QFont("sans-serif", 22)
-    font.setBold(True)
-    painter.setFont(font)
-    painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "FX")
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.scale(size / 100, size / 100)
+    if tile:
+        painter.setBrush(QColor(t.window))
+        painter.drawRoundedRect(QRectF(0, 0, 100, 100), 22, 22)
+        painter.translate(12, 12)
+        painter.scale(0.76, 0.76)
+    moon = QPainterPath()
+    moon.addEllipse(QPointF(46, 54), 38, 38)
+    cut = QPainterPath()
+    cut.addEllipse(QPointF(62, 38), 29, 29)
+    painter.setBrush(QColor(t.accent))
+    painter.drawPath(moon.subtracted(cut))
+    painter.setBrush(QColor(t.text))
+    for arm in (QRectF(61, 20, 10, 28), QRectF(52, 29, 28, 10)):
+        painter.drawRoundedRect(arm, 2.5, 2.5)
     painter.end()
-    return QIcon(pix)
+    return pix
 
 
 def choose_font() -> QFont:
@@ -140,8 +161,8 @@ def stylesheet(t: Theme) -> str:
     QWidget {{ color: {t.text}; }}
     QLabel#subtitle, QLabel#snapshot, QLabel#safety, QLabel#section {{ color: {t.muted}; }}
     QLabel#verdict {{ border-radius: 13px; padding: 4px 14px; font-weight: 600; }}
-    QLabel#empty {{ background: {t.surface}; color: {t.muted}; border: 1px solid {t.border};
-                 border-radius: 8px; padding: 32px; }}
+    QFrame#empty {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 8px; }}
+    QLabel#emptyText {{ color: {t.muted}; }}
     QLineEdit {{ background: {t.surface}; color: {t.text}; border: 1px solid {t.border_strong};
                  border-radius: 6px; padding: 6px 10px; selection-background-color: {t.accent};
                  selection-color: {t.on_accent}; }}
@@ -571,9 +592,20 @@ class Window(QMainWindow):
                                     QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.Stretch)):
             hdr.setSectionResizeMode(col, mode)
         self.tree.currentItemChanged.connect(self._finding_changed)
-        self.empty = QLabel(objectName="empty", alignment=Qt.AlignmentFlag.AlignCenter, wordWrap=True)
+        # Empty state: the NoX mark (before the first scan) above a short explanation.
+        self.empty_box = QFrame(objectName="empty")
+        empty_layout = QVBoxLayout(self.empty_box)
+        empty_layout.setContentsMargins(32, 32, 32, 32)
+        empty_layout.setSpacing(14)
+        empty_layout.addStretch(1)
+        self.empty_mark = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self.empty_mark.setAccessibleName("Doctor NoX")
+        empty_layout.addWidget(self.empty_mark)
+        self.empty = QLabel(objectName="emptyText", alignment=Qt.AlignmentFlag.AlignCenter, wordWrap=True)
+        empty_layout.addWidget(self.empty)
+        empty_layout.addStretch(1)
         self.stack.addWidget(self.tree)
-        self.stack.addWidget(self.empty)
+        self.stack.addWidget(self.empty_box)
         self.inner.addWidget(self.stack)
         self.details = QTextBrowser(objectName="details")
         self.details.setOpenLinks(False)
@@ -615,6 +647,7 @@ class Window(QMainWindow):
         self.pill_width = max(pill_size(font, text).width() for text in STATUS_TEXT.values())
         for sev, button in self.sev_buttons.items():
             button.setIcon(dot_icon(t.status[sev].fg, t.subtle))
+        self.empty_mark.setPixmap(nox_mark(t, 96, self.devicePixelRatioF()))
         for mode, action in self.theme_actions.items():
             action.setChecked(mode == self.theme_mode)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -773,18 +806,19 @@ class Window(QMainWindow):
         if self.report:
             state = self.report["overall"]
             complete = self.report["complete"]
-            self._set_verdict(themes.HEADLINE[state] + ("" if complete else " · incomplete"), state,
+            self._set_verdict(themes.HEADLINE[state] + ("" if complete else " (incomplete)"), state,
                               f"Overall state {STATUS_TEXT[state]}. {counts}")
             stamp = datetime.datetime.fromisoformat(self.report["generated_at"]).astimezone()
-            self.snapshot.setText(f"Last scan {stamp:%Y-%m-%d %H:%M} · {self.report['duration_ms']} ms")
+            self.snapshot.setText(f"Last scan {stamp:%Y-%m-%d %H:%M}, took {vm.duration_text(self.report['duration_ms'])}")
             totals = self.report["totals"]
             for sev, button in self.sev_buttons.items():
                 button.setText(f"{STATUS_TEXT[sev]}  {totals[sev]}")
         else:
             self._set_verdict("Scanning…" if self.scanning() else "Not scanned yet", None, "No results yet")
-            self.snapshot.setText("Checks are running" if self.scanning() else "No scan yet")
+            self.snapshot.setText("")
             for sev, button in self.sev_buttons.items():
                 button.setText(STATUS_TEXT[sev])
+        self.snapshot.setVisible(self.report is not None)
         self.scan_btn.setText("Scan again" if self.report else "Scan")
         self.copy_btn.setEnabled(self.report is not None)
         self.export_btn.setEnabled(self.report is not None)
@@ -831,7 +865,8 @@ class Window(QMainWindow):
         self.tree.blockSignals(False)
         message = vm.empty_state(self.report, self.scanning(), self.category, query, sevs)
         self.empty.setText(message)
-        self.stack.setCurrentWidget(self.empty if message else self.tree)
+        self.empty_mark.setVisible(self.report is None)
+        self.stack.setCurrentWidget(self.empty_box if message else self.tree)
         if keep is not None:
             self.tree.setCurrentItem(keep)  # emits currentItemChanged → _show
         else:
@@ -913,7 +948,7 @@ class Window(QMainWindow):
         try:
             import PySide6
             from PySide6.QtCore import qVersion
-            qt = f"PySide6 {PySide6.__version__} · Qt {qVersion()}"
+            qt = f"PySide6 {PySide6.__version__} with Qt {qVersion()}"
         except Exception:
             qt = "PySide6"
         t = self.theme
@@ -922,11 +957,13 @@ class Window(QMainWindow):
                      "org.freedesktop.Flatpak permission, not inside the sandbox.</p>"
                      if flatpak.sandbox_app_path() else "")
         text = (f"<h3 style='margin-bottom:4px'>Doctor NoX {VERSION}</h3>"
+                f"<p style='color:{t.muted};margin-top:0'>NoX is Latin for night, and the name is a play on "
+                f"&ldquo;Doctor Noooo&rdquo;.</p>"
                 f"<p>Read-only system health checks for Linux: Fedora (including Atomic and bootc), "
                 f"Debian and Ubuntu, Arch and openSUSE, with general checks everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. "
                 f"Reports are written only where you choose.</p>{sandboxed}"
-                f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION} · {qt} · "
+                f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION}, {qt}, "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
 
@@ -1201,7 +1238,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     check("Package database" in window.details.toPlainText(), "selection shows details")
     window.nav.setCurrentRow(3)  # Security & Services: empty in the fixture
     app.processEvents()
-    check(window.stack.currentWidget() is window.empty, "empty group shows the empty state")
+    check(window.stack.currentWidget() is window.empty_box, "empty group shows the empty state")
     window.nav.setCurrentRow(0)
     log("filtering done")
 

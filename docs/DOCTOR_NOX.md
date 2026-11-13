@@ -119,30 +119,41 @@ Doctor has a light and a dark theme. They are designed separately, not
 inverted, and both live in `doctor_nox/theme.py`, which has no Qt
 dependency.
 
+NoX is Latin for night, so the dark theme is the night shift in a clinic:
+deep night-blue surfaces, moonlight text, and status colours that glow softly
+like monitor lights. The light theme is first light: cool paper and indigo ink.
+
 - **Choosing:** by default Doctor follows the desktop's colour scheme (Qt's
   colour-scheme hint, else the desktop palette) and switches live when it
   changes. Choose a theme for the session under **View → Appearance**, or set
   `DOCTOR_NOX_THEME=light|dark|system`. Doctor writes no settings file.
-- **Accent:** a calm diagnostic cyan, used **only** for interaction: the
-  primary button, focus, selection and progress.
+- **Accent:** moonlit lavender (`#b5a8ff`) in the dark theme and indigo
+  (`#4a3cb5`) in the light one, used **only** for interaction: the primary
+  button, focus, selection and progress. No status colour is close to it.
 - **Status colours:** used only for results, so a selected row can never look
   like a result. Each status has a text colour, a soft tint and a border:
 
   | Status | Light text | Dark text |
   |---|---|---|
-  | Error | `#b3261e` | `#f47c74` |
-  | Warning | `#875200` | `#e8b84a` |
-  | Unknown | `#56616d` | `#a9b2be` |
-  | Info | `#1f5fa8` | `#78b6f0` |
-  | Pass | `#1b7a46` | `#5fca91` |
+  | Error | `#b3261e` | `#ff8e8b` |
+  | Warning | `#875200` | `#f1c35b` |
+  | Unknown | `#54587a` | `#b1b4cc` |
+  | Info | `#1f5fa8` | `#7db4ff` |
+  | Pass | `#18723f` | `#6cd4a1` |
 
 - **Contrast:** tests check every text/background pair against WCAG 2.x:
   - body text at least 7:1;
   - secondary and status text at least 4.5:1, including on tints and the
     selection colour;
   - the focus accent at least 3:1.
-- **Shape:** neutral grey surfaces with 1 px borders, 6–8 px rounded corners,
-  rounded status pills, and no animations.
+- **Shape:** night-blue (dark) or cool paper (light) surfaces with 1 px
+  borders, 6–8 px rounded corners, rounded status pills, and no animations.
+- **The NoX mark:** a crescent moon cradling a medical cross, drawn from
+  geometry by `gui.nox_mark()` in the theme's accent and text colours. It
+  appears on the empty results panel before the first scan.
+- **Wording:** sentence-case section labels, counts written as words
+  ("1 error, 2 warnings … and 6 passed"), and no dotted "A · B · C" strings
+  in the window.
 - **Fonts:** your desktop's UI font (or `DOCTOR_NOX_FONT` if that family is
   installed). Check IDs and evidence use the desktop's fixed-width font.
 - **Native dialogs:** a matching `QPalette` is applied, so native dialogs and
@@ -153,8 +164,8 @@ dependency.
     pinned original `tools/doctor-nox-icon-source.png` by
     `python3 tools/build_doctor_icon.py`.
   - The art is never redrawn, and there is no SVG.
-  - If the icon is missing, the window draws a deterministic glyph. There is
-    never a generic or Tux fallback.
+  - If the icon is missing, the window draws the NoX mark on a night tile.
+    There is never a generic or Tux fallback.
 
 ## Severity — what each level promises
 
