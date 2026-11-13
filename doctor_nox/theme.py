@@ -105,6 +105,31 @@ LIGHT_THEME = Theme(
 THEMES = {DARK: DARK_THEME, LIGHT: LIGHT_THEME}
 
 
+# ── The NoX mark: a crescent moon cradling a medical cross ──
+# Geometry on a 100-unit grid, shared by the window (gui.nox_mark) and the app
+# icon (tools/build_doctor_icon.py), so the two never drift apart.
+@dataclass(frozen=True)
+class MarkGeometry:
+    moon: tuple   # the moon's disc: centre x, centre y, radius
+    cut: tuple    # the circle cut out of it to leave a crescent: centre x, centre y, radius
+    cross: tuple  # centre x, centre y, arm length, arm thickness (corners round by a quarter of it)
+    inset: float  # on an icon tile: the grid's offset from the tile's edge, as a fraction of the tile
+    scale: float  # on an icon tile: the grid's size, as a fraction of the tile
+
+
+NOX_MARK = MarkGeometry(moon=(46, 54, 38), cut=(62, 38, 29), cross=(66, 34, 28, 10), inset=0.12, scale=0.76)
+# Icons of 24 px and smaller: a larger mark, thicker crescent and bolder cross, so the cross survives.
+NOX_MARK_SMALL = MarkGeometry(moon=(46, 54, 38), cut=(62, 38, 27), cross=(66, 34, 32, 13), inset=0.06, scale=0.88)
+SMALL_ICON = 24                     # sizes up to this use NOX_MARK_SMALL
+ICON_TILE = ("#3a2f8f", "#1a1640")  # the placeholder icon's indigo night tile, top to bottom
+ICON_MARGIN = 0.03                  # transparent margin around the tile, as a fraction of the icon
+ICON_RADIUS = 0.22                  # the tile's corner radius, as a fraction of the tile
+
+
+def mark_for(size: int) -> MarkGeometry:
+    return NOX_MARK_SMALL if size <= SMALL_ICON else NOX_MARK
+
+
 def status_count(severity: str, n: int) -> str:
     one, many = STATUS_COUNT[severity]
     return f"{n} {one if n == 1 else many}"

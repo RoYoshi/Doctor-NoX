@@ -159,14 +159,16 @@ like monitor lights. The light theme is first light: cool paper and indigo ink.
   installed). Check IDs and evidence use the desktop's fixed-width font.
 - **Native dialogs:** a matching `QPalette` is applied, so native dialogs and
   menus follow the theme.
-- **Icon:** `io.github.royoshi.doctornox` is RoYoshi's magenta medical badge
-  (white cross with a smile), until the new Doctor NoX icon is ready.
-  - It ships as raster PNGs at 16–512 px in `hicolor`, downscaled from the
-    pinned original `tools/doctor-nox-icon-source.png` by
-    `python3 tools/build_doctor_icon.py`.
-  - The art is never redrawn, and there is no SVG.
-  - If the icon is missing, the window draws the NoX mark on a night tile.
-    There is never a generic or Tux fallback.
+- **Icon:** `io.github.royoshi.doctornox` is a placeholder until RoYoshi
+  draws the Doctor NoX icon: the NoX mark on an indigo night tile.
+  - It ships as raster PNGs at 16–512 px in `hicolor`, drawn by
+    `python3 tools/build_doctor_icon.py` (needs Pillow) from the mark's
+    geometry in `theme.py`, the same geometry the window uses. Sizes up to
+    24 px use a larger, bolder mark so the cross survives.
+  - The earlier icon, RoYoshi's magenta medical badge, is in the repository
+    history: `git show bb6ae57:tools/doctor-nox-icon-source.png > badge.png`.
+  - If the icon is missing, the window draws the same icon itself. There is
+    never a generic or Tux fallback.
 
 ## Severity — what each level promises
 

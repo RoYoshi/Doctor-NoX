@@ -513,6 +513,23 @@ class ThemeTests(unittest.TestCase):
                 if isinstance(value, str):
                     self.assertNotIn(value.lower(), ("#00ff00", "#ff00ff"))
 
+    def test_nox_mark_cross_sits_in_the_moons_hollow(self):
+        """The cross never touches the crescent: every corner of both arms lies inside the cut-out circle."""
+        for mark in (theme.NOX_MARK, theme.NOX_MARK_SMALL):
+            (cx, cy, cr), (x, y, length, thick) = mark.cut, mark.cross
+            for half_w, half_h in ((thick / 2, length / 2), (length / 2, thick / 2)):
+                for dx in (-half_w, half_w):
+                    for dy in (-half_h, half_h):
+                        self.assertLess(((x + dx - cx) ** 2 + (y + dy - cy) ** 2) ** 0.5, cr, mark)
+            mx, my, mr = mark.moon
+            self.assertTrue(0 <= mx - mr and mx + mr <= 100 and 0 <= my - mr and my + mr <= 100, "moon on the grid")
+            self.assertLessEqual(mark.inset * 2 + mark.scale, 1.0 + 1e-9, "the mark stays on its tile")
+        self.assertIs(theme.mark_for(16), theme.NOX_MARK_SMALL)
+        self.assertIs(theme.mark_for(25), theme.NOX_MARK)
+        for tile in theme.ICON_TILE:  # WCAG 1.4.11: graphics at least 3:1 against what is behind them
+            self.assertGreaterEqual(theme.contrast(theme.DARK_THEME.accent, tile), 3.0)
+            self.assertGreaterEqual(theme.contrast(theme.DARK_THEME.text, tile), 3.0)
+
     def test_mode_selection(self):
         self.assertEqual(theme.requested_mode({}), "system")
         self.assertEqual(theme.requested_mode({"DOCTOR_NOX_THEME": " Light "}), "light")
@@ -571,13 +588,11 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(needle, desktop)
         json.loads(SCHEMA.read_text())
 
-    def test_doctor_icon_is_its_own_raster_badge(self):
-        import hashlib
-        import re
+    def test_doctor_icon_is_the_nox_placeholder(self):
         import struct
         hicolor = ROOT / "data/icons/hicolor"
         name = "io.github.royoshi.doctornox"
-        # Raster only: RoYoshi's badge is never redrawn or wrapped in an SVG.
+        # Raster PNGs at every size the packages install, drawn by the icon tool (no SVG to install).
         self.assertFalse((hicolor / f"scalable/apps/{name}.svg").exists())
         for size in (16, 22, 24, 32, 48, 64, 128, 256, 512):
             png = (hicolor / f"{size}x{size}/apps/{name}.png").read_bytes()
@@ -585,11 +600,12 @@ class PackagingTests(unittest.TestCase):
             width, height, _depth, colour_type = struct.unpack(">IIBB", png[16:26])
             self.assertEqual((width, height), (size, size))
             self.assertEqual(colour_type, 6, "RGBA so the icon keeps its transparent background")
-        source = ROOT / "tools/doctor-nox-icon-source.png"
+        # The icon and the window draw the same mark from theme.py's geometry.
         tool = (ROOT / "tools/build_doctor_icon.py").read_text()
-        pinned = re.search(r'^SOURCE_SHA256 = "([0-9a-f]{64})"$', tool, re.M).group(1)
-        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), pinned, "source art changed")
         self.assertTrue(os.access(ROOT / "tools/build_doctor_icon.py", os.X_OK))
+        for shared in ("mark_for", "ICON_TILE", "ICON_MARGIN", "ICON_RADIUS"):
+            self.assertIn(shared, tool)
+            self.assertIn(f"themes.{shared}", (PKG / "gui.py").read_text())
         # Independent identity: no distribution logo anywhere in Doctor's icon chain.
         gui = (PKG / "gui.py").read_text()
         self.assertIn("ICON_NAMES = (APP_ID,)", gui)

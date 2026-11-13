@@ -15,8 +15,8 @@ import traceback
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
-                           QGuiApplication, QIcon, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap,
-                           QShortcut)
+                           QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
+                           QPen, QPixmap, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
@@ -29,7 +29,7 @@ from .context import Context
 from .model import CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
 from .theme import STATUS_TEXT, Theme
 
-# Doctor's own identity (the medical badge), independent of any distribution logo.
+# Doctor's own identity (the NoX icon), independent of any distribution logo.
 ICON_NAMES = (APP_ID,)
 ICON_PATHS = (f"/usr/share/icons/hicolor/512x512/apps/{APP_ID}.png",)
 NARROW = 1180  # below this width the detail pane moves under the list
@@ -42,7 +42,7 @@ QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (styleshee
 
 # ── identity: icon and fonts ────────────────────────────────────────────────
 def app_icon() -> QIcon:
-    """Doctor's badge from the icon theme or its installed file; never a generic/Tux fallback.
+    """Doctor's icon from the icon theme or its installed file; never a generic/Tux fallback.
 
     If neither exists, the NoX mark is drawn on a night tile (always the dark colours, so the
     result never depends on the theme).
@@ -62,8 +62,9 @@ def app_icon() -> QIcon:
 def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPixmap:
     """The NoX mark: a crescent moon (accent) cradling a medical cross (text colour).
 
-    Drawn from geometry on a 100-unit grid, so it is sharp at any size and needs no file.
-    With tile=True it sits on a rounded night-coloured square, for use as an icon.
+    Drawn from theme.py's geometry, so it is sharp at any size and needs no file. With
+    tile=True it is the placeholder app icon exactly as tools/build_doctor_icon.py draws it:
+    on the indigo night tile, with the bolder mark at small sizes.
     """
     pix = QPixmap(max(1, round(size * ratio)), max(1, round(size * ratio)))
     pix.setDevicePixelRatio(ratio)
@@ -72,20 +73,28 @@ def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPi
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     painter.setPen(Qt.PenStyle.NoPen)
     painter.scale(size / 100, size / 100)
+    mark = themes.mark_for(size) if tile else themes.NOX_MARK
     if tile:
-        painter.setBrush(QColor(t.window))
-        painter.drawRoundedRect(QRectF(0, 0, 100, 100), 22, 22)
-        painter.translate(12, 12)
-        painter.scale(0.76, 0.76)
+        side = 100 * (1 - 2 * themes.ICON_MARGIN)
+        edge = 100 * themes.ICON_MARGIN
+        gradient = QLinearGradient(0, edge, 0, edge + side)
+        gradient.setColorAt(0, QColor(themes.ICON_TILE[0]))
+        gradient.setColorAt(1, QColor(themes.ICON_TILE[1]))
+        painter.setBrush(QBrush(gradient))
+        corner = themes.ICON_RADIUS * side
+        painter.drawRoundedRect(QRectF(edge, edge, side, side), corner, corner)
+        painter.translate(edge + mark.inset * side, edge + mark.inset * side)
+        painter.scale(mark.scale * side / 100, mark.scale * side / 100)
+    (mx, my, mr), (cx, cy, cr), (x, y, length, thick) = mark.moon, mark.cut, mark.cross
     moon = QPainterPath()
-    moon.addEllipse(QPointF(46, 54), 38, 38)
+    moon.addEllipse(QPointF(mx, my), mr, mr)
     cut = QPainterPath()
-    cut.addEllipse(QPointF(62, 38), 29, 29)
+    cut.addEllipse(QPointF(cx, cy), cr, cr)
     painter.setBrush(QColor(t.accent))
     painter.drawPath(moon.subtracted(cut))
     painter.setBrush(QColor(t.text))
-    for arm in (QRectF(61, 20, 10, 28), QRectF(52, 29, 28, 10)):
-        painter.drawRoundedRect(arm, 2.5, 2.5)
+    for arm in (QRectF(x - thick / 2, y - length / 2, thick, length), QRectF(x - length / 2, y - thick / 2, length, thick)):
+        painter.drawRoundedRect(arm, thick / 4, thick / 4)
     painter.end()
     return pix
 
