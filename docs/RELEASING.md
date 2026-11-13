@@ -38,31 +38,44 @@ The RPM signing key belongs to the project owner. It is created on your own
 machine, stored as a GitHub Actions secret, and never shared in chats, issues
 or commits. Only the **public** key is committed.
 
-1. **Create the key** (on your machine; a passphrase is recommended):
+Run these in your own terminal, signed in to GitHub as yourself. In a
+Codespace, first run `unset GITHUB_TOKEN GH_TOKEN` and `gh auth login`: the
+Codespace's own token cannot set secrets. The commands keep the key's
+fingerprint in `$fpr`, so run them all in the same terminal.
+
+1. **Choose the key.** The committed key (`packaging/signing-key.fingerprint`)
+   is FE-Xico Doctor's, `D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55`. If you
+   still have its private key, use it: FE-XicoOS already trusts it.
+
+   ```bash
+   fpr=D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55
+   gpg --list-secret-keys "$fpr"    # must show a "sec" line; if not, make a new key instead
+   ```
+
+   Otherwise make a new key (a passphrase is recommended) and commit its
+   public key and fingerprint to `main`:
 
    ```bash
    gpg --quick-gen-key "Doctor NoX RPM signing <99851152+RoYoshi@users.noreply.github.com>" rsa4096 sign 3y
-   gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}'   # the fingerprint
+   fpr=$(gpg --list-secret-keys --with-colons "Doctor NoX RPM signing" | awk -F: '/^fpr/ {print $10; exit}')
+   echo "$fpr"                     # stop here if this is empty or not the new key
+   gpg --armor --export "$fpr" > packaging/RPM-GPG-KEY-doctor-nox
+   echo "$fpr" > packaging/signing-key.fingerprint
    ```
 
-2. **Commit the public key and its fingerprint** in a pull request:
+   FE-XicoOS then has to pin the new public key too, in a reviewed change.
+
+2. **Store the private key as secrets** of this repository (not FE-XicoOS):
 
    ```bash
-   gpg --armor --export FINGERPRINT > packaging/RPM-GPG-KEY-doctor-nox
-   echo FINGERPRINT > packaging/signing-key.fingerprint
-   ```
-
-3. **Store the private key as secrets** of this repository (not FE-XicoOS):
-
-   ```bash
-   gpg --armor --export-secret-keys FINGERPRINT | gh secret set DOCTOR_RPM_SIGNING_KEY -R RoYoshi/Doctor-NoX
+   gpg --armor --export-secret-keys "$fpr" | gh secret set DOCTOR_RPM_SIGNING_KEY -R RoYoshi/Doctor-NoX
    gh secret set DOCTOR_RPM_SIGNING_PASSPHRASE -R RoYoshi/Doctor-NoX    # prompts; skip if no passphrase
    ```
 
    Keep an offline backup of the private key. Losing it means a new key, and
    FE-XicoOS must then pin the new public key in a reviewed change.
 
-4. **Protect the release environment.** In *Settings → Environments*, create
+3. **Protect the release environment.** In *Settings → Environments*, create
    `doctor-release`, add yourself as a required reviewer, and limit it to the
    `main` branch.
 
