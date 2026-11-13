@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # FE-XicoOS builds on Fedora 45; 44 remains its known fallback.
+        # Fedora's two supported releases.
         fedora: [45, 44]
     steps:
       - name: Bootstrap Git

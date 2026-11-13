@@ -152,8 +152,9 @@ like monitor lights. The light theme is first light: cool paper and indigo ink.
   geometry by `gui.nox_mark()` in the theme's accent and text colours. It
   appears on the empty results panel before the first scan.
 - **Wording:** sentence-case section labels, counts written as words
-  ("1 error, 2 warnings … and 6 passed"), and no dotted "A · B · C" strings
-  in the window.
+  ("1 error, 2 warnings … and 6 passed"), and commas rather than dotted
+  "A · B · C" strings in the window's own header and labels. Check results
+  keep each check's own wording.
 - **Fonts:** your desktop's UI font (or `DOCTOR_NOX_FONT` if that family is
   installed). Check IDs and evidence use the desktop's fixed-width font.
 - **Native dialogs:** a matching `QPalette` is applied, so native dialogs and
