@@ -127,7 +127,7 @@ NOX_MARK = MarkGeometry(moon=(52, 48, 38), cut=(68, 32, 29), cross=(72, 28, 28, 
 # Icons of 24 px and smaller: a larger mark, thicker crescent and bolder cross, so the cross survives.
 NOX_MARK_SMALL = MarkGeometry(moon=(51, 49, 38), cut=(67, 33, 27), cross=(71, 29, 32, 13), tip=1.6, scale=0.94)
 SMALL_ICON = 24                     # sizes up to this use NOX_MARK_SMALL
-ICON_TILE = ("#3a2f8f", "#1a1640")  # the placeholder icon's indigo night tile, top to bottom
+ICON_TILE = ("#3a2f8f", "#1a1640")  # the app icon's indigo night tile, top to bottom
 ICON_MARGIN = 0.03                  # transparent margin around the tile, as a fraction of the icon
 ICON_RADIUS = 0.22                  # the tile's corner radius, as a fraction of the tile
 

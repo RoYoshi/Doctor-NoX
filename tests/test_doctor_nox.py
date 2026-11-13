@@ -604,7 +604,7 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(needle, desktop)
         json.loads(SCHEMA.read_text())
 
-    def test_doctor_icon_is_the_nox_placeholder(self):
+    def test_doctor_icon_is_the_nox_mark(self):
         import struct
         hicolor = ROOT / "data/icons/hicolor"
         name = "io.github.royoshi.doctornox"

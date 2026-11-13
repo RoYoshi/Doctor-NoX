@@ -159,8 +159,8 @@ like monitor lights. The light theme is first light: cool paper and indigo ink.
   installed). Check IDs and evidence use the desktop's fixed-width font.
 - **Native dialogs:** a matching `QPalette` is applied, so native dialogs and
   menus follow the theme.
-- **Icon:** `io.github.royoshi.doctornox` is a placeholder until RoYoshi
-  draws the Doctor NoX icon: the NoX mark on an indigo night tile.
+- **Icon:** `io.github.royoshi.doctornox` is the NoX mark on an indigo night
+  tile.
   - It ships as raster PNGs at 16–512 px in `hicolor`, drawn by
     `python3 tools/build_doctor_icon.py` (needs Pillow) from the mark's
     geometry in `theme.py`, the same geometry the window uses. Sizes up to

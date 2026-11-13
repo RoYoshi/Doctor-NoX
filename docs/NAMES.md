@@ -17,9 +17,9 @@ fresh history. These names and paths changed:
 | Theme and font variables | `FE_XICO_DOCTOR_THEME`, `FE_XICO_DOCTOR_FONT` | `DOCTOR_NOX_THEME`, `DOCTOR_NOX_FONT` |
 | Public signing key file | `packaging/RPM-GPG-KEY-fe-xico-doctor` (key `D0FA314C…`) | `packaging/RPM-GPG-KEY-doctor-nox` (a new key, `15E1018F…`) |
 
-The app icon is now a NoX placeholder, a crescent moon cradling a medical
-cross on an indigo night tile, until the Doctor NoX icon is drawn. The magenta
-medical badge it replaced is in the repository history.
+The app icon is now the NoX mark, a crescent moon cradling a medical cross on
+an indigo night tile. The magenta medical badge it replaced is in the
+repository history.
 
 ## From FE-XicoOS-only to every Linux
 

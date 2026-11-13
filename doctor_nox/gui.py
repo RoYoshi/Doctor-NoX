@@ -63,7 +63,7 @@ def nox_mark(t: Theme, size: int, ratio: float = 1.0, tile: bool = False) -> QPi
     """The NoX mark: a crescent moon (accent) cradling a medical cross (text colour).
 
     Drawn from theme.py's geometry, so it is sharp at any size and needs no file. With
-    tile=True it is the placeholder app icon as tools/build_doctor_icon.py draws it, on the
+    tile=True it is the app icon as tools/build_doctor_icon.py draws it, on the
     indigo night tile with the bolder mark at small sizes, but without the faint glow and edge
     light the tool adds from 48 px up.
     """

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Build Doctor NoX's placeholder app icon: the NoX mark on an indigo night tile.
+"""Build Doctor NoX's app icon: the NoX mark on an indigo night tile.
 
-Developer tool only (needs Pillow); never runs in a package build. The icon is a
-placeholder until RoYoshi draws the Doctor NoX icon. It is drawn from the mark's
-geometry in doctor_nox/theme.py, the same geometry the window uses
-(gui.nox_mark), so the icon and the in-app mark never drift apart:
+Developer tool only (needs Pillow); never runs in a package build. The icon is
+drawn from the mark's geometry in doctor_nox/theme.py, the same geometry the
+window uses (gui.nox_mark), so the icon and the in-app mark never drift apart:
 
     python3 tools/build_doctor_icon.py
 
