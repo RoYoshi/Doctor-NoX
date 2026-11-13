@@ -1,12 +1,31 @@
-# Doctor NoX
+<p align="center">
+  <img src="https://raw.githubusercontent.com/RoYoshi/Doctor-NoX/main/data/icons/hicolor/256x256/apps/io.github.royoshi.doctornox.png" width="128" height="128" alt="Doctor NoX icon: a crescent moon cradling a medical cross, on an indigo night tile">
+</p>
 
-A read-only health checker for Linux desktops. It looks at the parts of a
-system that tend to go wrong (updates and packages, security, services,
-graphics drivers, game controllers, storage, apps, the network and logs)
-and, for each finding, says what it means and what you can do about it.
+<h1 align="center">Doctor NoX</h1>
 
-Doctor only looks. It never needs root, never changes anything, never makes a
-network request, and never uploads anything.
+<p align="center">
+  <strong>A read-only health check for your Linux desktop.</strong><br>
+  It finds what is wrong with updates, security, drivers, storage, the network and logs,<br>
+  then tells you what each finding means and what you can do about it.
+</p>
+
+<p align="center">
+  <a href="https://github.com/RoYoshi/Doctor-NoX/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/RoYoshi/Doctor-NoX/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/RoYoshi/Doctor-NoX/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RoYoshi/Doctor-NoX?label=release&color=4a3cb5"></a>
+  <a href="https://github.com/RoYoshi/Doctor-NoX/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-4a3cb5"></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a>&emsp;<a href="#using-it">Using it</a>&emsp;<a href="#how-it-stays-safe">How it stays safe</a>&emsp;<a href="https://github.com/RoYoshi/Doctor-NoX/blob/main/docs/DOCTOR_NOX.md">Documentation</a>
+</p>
+
+---
+
+> **Doctor only looks.** It never needs root, never changes anything, never
+> makes a network request, and never uploads anything.
+
+## Which Linux it knows
 
 It knows these families, and runs its general checks on any other Linux:
 
@@ -123,7 +142,7 @@ Check the key, then install:
 
 ```bash
 gpg --show-keys RPM-GPG-KEY-doctor-nox
-#   the fingerprint must be D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55
+#   the fingerprint must be 15E1018F7CDEF196E2B0C3F0AA19D45E300CE63D
 sudo rpmkeys --import RPM-GPG-KEY-doctor-nox
 rpmkeys --checksig doctor-nox-1.0.0-1.fc45.noarch.rpm   # expect "signatures OK"
 sudo dnf install ./doctor-nox-1.0.0-1.fc45.noarch.rpm
@@ -206,8 +225,9 @@ Python wheel and sdist, all in a signed `SHA256SUMS`.
 [docs/RELEASING.md](docs/RELEASING.md) covers versioning, signing, verification,
 and what PyPI, the AUR and Flathub still need.
 
-Signing key: `D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55`
+Signing key: `15E1018F7CDEF196E2B0C3F0AA19D45E300CE63D`
 ([`packaging/RPM-GPG-KEY-doctor-nox`](packaging/RPM-GPG-KEY-doctor-nox)).
+FE-Xico Doctor's releases were signed with an earlier key, `D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55`.
 
 ## History
 

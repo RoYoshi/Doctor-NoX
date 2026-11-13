@@ -44,11 +44,11 @@ Codespace's own token cannot set secrets. The commands keep the key's
 fingerprint in `$fpr`, so run them all in the same terminal.
 
 1. **Choose the key.** The committed key (`packaging/signing-key.fingerprint`)
-   is FE-Xico Doctor's, `D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55`. If you
-   still have its private key, use it: FE-XicoOS already trusts it.
+   is Doctor NoX's own, `15E1018F7CDEF196E2B0C3F0AA19D45E300CE63D`, made in
+   November 2026. If you have it (where you made it, or your backup), use it:
 
    ```bash
-   fpr=D0FA314C5A9DAE72B16F0AAEEB49C4761F24DE55
+   fpr=15E1018F7CDEF196E2B0C3F0AA19D45E300CE63D
    gpg --list-secret-keys "$fpr"    # must show a "sec" line; if not, make a new key instead
    ```
 
