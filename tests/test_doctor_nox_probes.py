@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from doctor_testlib import (KERNEL, MISSING, NOW, PRESETS, TIMEOUT, FakeRunner, Tree, bootc_entry,  # noqa: E402
                             bootc_host, exit_, install_distro, ok, ostree_entry, ostree_status)
 
-from doctor_nox import distro, engine, model  # noqa: E402
+from doctor_nox import clinic, distro, engine, model  # noqa: E402
 from doctor_nox.probes import (Probe, hardware, load_all, logs, network, security, software, storage,  # noqa: E402
                                system, updates)
 
@@ -30,6 +30,14 @@ def by_id(findings):
     if not isinstance(findings, list):
         findings = [findings]
     return {f.id: f for f in findings}
+
+
+def vital(key, findings):
+    """The vital sign the window would show for what these probes found (clinic.vitals)."""
+    if not isinstance(findings, (list, dict)):
+        findings = [findings]
+    items = findings.values() if isinstance(findings, dict) else findings
+    return {v["key"]: v for v in clinic.vitals({"findings": [f.to_dict() for f in items]})}[key]
 
 
 def age(path, days):
@@ -105,6 +113,22 @@ class PlatformTests(Base):
         self.distro("arch")
         ctx = self.ctx()
         self.assertIs(ctx.platform, ctx.platform)
+
+
+class ClinicCoverageTests(unittest.TestCase):
+    def test_every_complaint_and_vital_sign_names_tests_that_exist(self):
+        ids = {p.id for p in load_all()}
+
+        def exists(test):  # a probe, an "area." prefix with probes in it, or a probe's sub-result
+            return (test in ids or any(i.startswith(test if test.endswith(".") else test + ".") for i in ids)
+                    or test.rsplit(".", 1)[0] in ids)
+        for symptom in clinic.SYMPTOMS:
+            for test in symptom.tests:
+                self.assertTrue(exists(test), f"{symptom.key}: {test}")
+        for key, _label, tests in clinic.VITALS:
+            for test in tests:
+                self.assertTrue(exists(test), f"{key}: {test}")
+        self.assertEqual({key for key, _l, _t in clinic.VITALS}, set(clinic._READ))
 
 
 class ApplicabilityTests(Base):
@@ -200,6 +224,7 @@ class BootcTests(Base):
         self.assertIn("44.20261030.0", f["system.image.booted"].summary)
         self.assertEqual(f["system.image.rollback"].severity, "pass")
         self.assertEqual(f["system.image.pending"].severity, "pass")
+        self.assertEqual(vital("restart", f)["value"], "Not needed")
         self.assertEqual(f["system.image.source"].severity, "pass")
         self.assertTrue(any("built 3 days ago" in e for e in f["system.image.booted"].evidence))
         self.assertNotIn(RPM_OSTREE, self.runner.calls, "bootc answered; rpm-ostree is not asked")
@@ -211,14 +236,17 @@ class BootcTests(Base):
         f = self.scan(bootc_host(staged=bootc_entry("44.20261031.0", "d", download_only=False)))
         self.assertEqual(f["system.image.pending"].severity, "info")
         self.assertIn("applies at the next reboot", f["system.image.pending"].summary)
+        self.assertEqual(vital("restart", f)["value"], "Update waiting")
 
     def test_download_only_is_never_called_reboot_applicable(self):
         pending = self.scan(bootc_host(staged=bootc_entry("44.20261031.0", "d", download_only=True)))["system.image.pending"]
         self.assertIn("will NOT be applied at reboot", pending.summary)
+        self.assertEqual(vital("restart", pending)["value"], "Not needed", "a restart would not apply it")
         self.assertNotIn("applies at the next reboot", pending.summary)
 
     def test_rollback_queued(self):
         self.assertIn("Rollback queued", self.scan(bootc_host(queued=True))["system.image.pending"].summary)
+        self.assertEqual(vital("restart", self.scan(bootc_host(queued=True)))["value"], "Rollback waiting")
 
     def test_pinned_recovery_counted_across_all_slots(self):
         f = self.scan(bootc_host(others=[bootc_entry("44.20260901.0", "e", pinned=True)]))
@@ -322,6 +350,7 @@ class RebootTests(Base):
         f = updates.reboot(self.ctx())
         self.assertEqual(f.severity, "info")
         self.assertIn("apt/dpkg asked for a restart", f.summary)
+        self.assertEqual(vital("restart", f)["value"], "Needed")
         self.assertTrue(any("libc6, linux-image-6.8.0-50-generic" in e for e in f.evidence))
         age(flag, 9)
         self.assertEqual(updates.reboot(self.ctx()).severity, "warn", "a restart put off for over a week")
@@ -340,6 +369,7 @@ class RebootTests(Base):
         kernel = self.distro("ubuntu")
         self.modules(kernel, "6.8.0-50-lowlatency")
         self.assertEqual(updates.reboot(self.ctx()).severity, "pass", "another flavour is not an update")
+        self.assertEqual(vital("restart", updates.reboot(self.ctx()))["value"], "Not needed")
         self.modules("6.8.0-51-generic")
         f = updates.reboot(self.ctx())
         self.assertEqual(f.severity, "info")
@@ -862,8 +892,12 @@ class OtherHardwareTests(Base):
         self.tree.write("/proc/cpuinfo", "processor\t: 0\nmodel name\t: AMD Ryzen 7\n\nprocessor\t: 1\n")
         self.tree.write("/proc/meminfo", "MemTotal:       32000000 kB\nMemAvailable:   20000000 kB\n")
         self.assertEqual(hardware.cpu_memory(self.ctx()).severity, "pass")
+        self.assertEqual(vital("memory", hardware.cpu_memory(self.ctx()))["value"], "19.1 GiB free of 30.5 GiB")
         self.tree.write("/proc/meminfo", "MemTotal:       32000000 kB\nMemAvailable:   100000 kB\n")
         self.assertEqual(hardware.cpu_memory(self.ctx()).severity, "warn")
+        self.assertEqual(vital("memory", hardware.cpu_memory(self.ctx()))["value"], "0.1 GiB free of 30.5 GiB")
+        self.tree.p("/proc/meminfo").unlink()
+        self.assertEqual(vital("memory", hardware.cpu_memory(self.ctx()))["value"], "Couldn't read")
 
     def test_session(self):
         self.assertEqual(hardware.session(self.ctx(env={"XDG_SESSION_TYPE": "wayland",
@@ -887,12 +921,15 @@ class OtherHardwareTests(Base):
         self.assertEqual(hardware.audio(self.ctx()).severity, "pass", "no runtime dir: no claim about the server")
 
     def test_sensors(self):
+        self.assertEqual(vital("temperature", hardware.sensors(self.ctx()))["value"], "No sensor")
         self.tree.write("/sys/class/hwmon/hwmon0/name", "k10temp")
         self.tree.write("/sys/class/hwmon/hwmon0/temp1_input", "61000")
         self.tree.write("/sys/class/hwmon/hwmon0/temp1_crit", "100000")
         self.assertEqual(hardware.sensors(self.ctx()).severity, "pass")
+        self.assertEqual(vital("temperature", hardware.sensors(self.ctx()))["value"], "61 °C")
         self.tree.write("/sys/class/hwmon/hwmon0/temp1_input", "101000")
         self.assertEqual(hardware.sensors(self.ctx()).severity, "warn")
+        self.assertEqual(vital("temperature", hardware.sensors(self.ctx()))["value"], "101 °C")
 
 
 # ── Storage ─────────────────────────────────────────────────────────────────
@@ -1033,12 +1070,14 @@ class FreeSpaceTests(Base):
                                            "/home": (300 * GiB, 900 * GiB)})
         self.assertEqual(f.severity, "error")
         self.assertEqual(f.summary, "Low free space: /boot")
+        self.assertEqual((vital("disk", f)["value"], vital("disk", f)["severity"]), ("6% free on /boot", "error"))
         self.assertTrue(any("old kernels" in g for g in f.guidance))
         self.assertTrue(any("61 MiB free" in e for e in f.evidence))
 
     def test_btrfs_subvolumes_are_one_filesystem(self):
         f, _ = self.space(BTRFS_MOUNTS, {"/": (40 * GiB, 900 * GiB)}, name="tumbleweed")
         self.assertEqual(f.severity, "pass")
+        self.assertEqual(vital("disk", f)["value"], "4% free on /", "the tightest filesystem, by its first path")
         self.assertEqual(len([e for e in f.evidence if "free of" in e]), 1)
         self.assertTrue(any("/ + /var + /home/alice" in e for e in f.evidence))
         f, _ = self.space(BTRFS_MOUNTS, {"/": (3 * GiB, 900 * GiB)}, name="tumbleweed")

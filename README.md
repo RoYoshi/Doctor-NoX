@@ -5,9 +5,9 @@
 <h1 align="center">Doctor NoX</h1>
 
 <p align="center">
-  <strong>A read-only health check for your Linux desktop.</strong><br>
-  It finds what is wrong with updates, security, drivers, storage, the network and logs,<br>
-  then tells you what each finding means and what you can do about it.
+  <strong>A doctor for your Linux PC.</strong><br>
+  It examines updates, security, drivers, storage, the network and logs, tells you the diagnosis,<br>
+  and prescribes the treatment. It never operates: it changes nothing on your system.
 </p>
 
 <p align="center">
@@ -57,26 +57,39 @@ showing up as Unknown.
 The full list, with what each one reads, is in
 [docs/DOCTOR_NOX.md](docs/DOCTOR_NOX.md#checks).
 
-Every finding has one of five levels:
+Every finding has one of five conditions. The window says them as a doctor
+would; `--text`, `--summary` and JSON keep the report's severity names:
 
-| Level | Meaning |
-|---|---|
-| **Pass** | verified healthy |
-| **Info** | verified, worth knowing, not a fault |
-| **Warning** | verified, may need attention |
-| **Error** | verified fault likely to break something |
-| **Unknown** | could not be verified (missing tool, permission); never counted as a pass |
+| In the window | In reports | Meaning |
+|---|---|---|
+| **Healthy** | PASS | examined and healthy |
+| **Note** | INFO | worth knowing, not a problem |
+| **Keep an eye on it** | WARN | not urgent, but it may need care |
+| **Needs treatment** | ERROR | a problem likely to break something |
+| **Couldn't examine** | UNKNOWN | a missing tool or permission; never counted as healthy |
 
 There is deliberately no percentage "health score".
 
 ## Using it
 
-Open **Doctor NoX** from your app menu, or run `doctor-nox`. The window shows
-the overall state, the check groups, results sorted most urgent first, and the
-details of the selected finding: evidence and what you can do. Doctor never
-runs those steps itself. It has light and dark themes and follows your desktop
-by default. The main actions have shortcuts: F5 scans, Ctrl+F filters, Ctrl+S
-saves a redacted report.
+Open **Doctor NoX** from your app menu, or run `doctor-nox`. It gives your PC
+a checkup and talks you through it like a doctor:
+
+- **The verdict** comes first, in plain sentences: what needs treatment, what
+  to keep an eye on, where to start, and what it couldn't examine.
+- **What's wrong?** Tell it the complaint (no sound, no internet, updates
+  won't install, slow, graphics, crashes) and it shows the tests that bear on
+  it and speaks to that.
+- **Vital signs** stay in view: temperature, memory, disk space, and whether a
+  restart is waiting.
+- **Each finding** has a diagnosis, what was found, and a treatment. Doctor
+  NoX never carries a treatment out itself.
+- **Follow-ups:** it remembers the last checkup on this PC and says what got
+  better or worse since.
+
+It has light and dark themes and follows your desktop by default. The main
+actions have shortcuts: F5 starts a checkup, Ctrl+F finds, Ctrl+S saves a
+redacted report.
 
 From a terminal:
 
@@ -98,7 +111,7 @@ The window needs PySide6 (Qt for Python). The command line needs only Python
 
 ### Sharing a report
 
-`--redact`, **Copy summary** and **Export → Redacted report** replace your
+`--redact`, **Copy doctor's note** and **Export → Redacted report** replace your
 username, hostname, home paths, IP and MAC addresses, e-mail addresses,
 tokens, passwords, keys and machine IDs with placeholders. Redaction is
 best-effort, so read the report before you post it. Full reports are saved
@@ -107,8 +120,11 @@ only where you choose, readable only by you (mode 0600).
 ## How it stays safe
 
 - **Read-only.** No sudo or Polkit, no package installs or removals, no
-  bootc or rpm-ostree changes, no `systemctl start/stop/enable`, no reboots, no
-  file changes outside a report you save.
+  bootc or rpm-ostree changes, no `systemctl start/stop/enable`, no reboots.
+  It writes two things only, both in your own files: a report you save, and
+  the window's record of your last checkup
+  (`~/.local/state/doctor-nox/last-checkup.json`: a time and one condition per
+  test, nothing else), which is what follow-ups compare with.
 - **Allowlisted commands.** Every program Doctor may run, and every argument
   list it may use, is declared in [`doctor_nox/runner.py`](doctor_nox/runner.py):
   queries such as `rpm -q`, `dpkg --audit`, `pacman -Qdtq`, `rpm-ostree status`

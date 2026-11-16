@@ -1,8 +1,11 @@
 # Doctor NoX · v1.0
 
-Doctor NoX is a **read-only** health checker for Linux. It never changes
-packages, deployments, services, drivers or files outside a report you
-explicitly save, never needs root and never makes network requests.
+Doctor NoX is a doctor for your Linux PC: it examines, diagnoses and
+prescribes, and never operates. It is **read-only** towards the system. It
+never changes packages, deployments, services, drivers or settings, never needs
+root and never makes network requests. It writes only a report you explicitly
+save and, to follow up, one file of its own with the conditions found at your
+last checkup ([Follow-ups](#follow-ups-the-one-file-doctor-nox-keeps)).
 
 ## Launch
 
@@ -53,65 +56,138 @@ system it is for, and the window shows these under **Not applicable here**.
 
 ## The window
 
-- **Header:** the Doctor icon, the distribution · image type · kernel, and the
-  overall state as a coloured pill with a plain-language headline:
-  - **Problems found**: at least one Error;
-  - **Needs attention**: at least one Warning;
-  - **Partly verified**: at least one Unknown;
-  - **Healthy**: otherwise.
+Doctor NoX speaks as a doctor would. A **checkup** runs every **test** that
+applies to this PC. Tests are grouped into **areas**. Each result has a
+**condition**, and may have a **diagnosis**, **what I found** and a
+**treatment**. Doctor NoX examines and prescribes; it never operates, so every
+treatment is yours to carry out.
 
-  The time and duration of the last scan sit under the pill.
-- **Check groups (left):** Overview, System, Updates & Packages, Security &
-  Services, Hardware & Gaming, Storage, Apps, Network, Logs.
-  - A group with problems shows a pill with how many checks are Error, Warning
-    or Unknown, coloured by the worst one.
-  - A group where everything was verified shows a green **OK** pill.
-- **Results (centre):** sorted most-urgent first, with a status pill per row and
-  alternating row shading. The status is always spelled out in text, never
-  conveyed by colour alone.
-- **Details (right, or below on narrow windows):**
-  - status, summary and what that status means;
-  - **Why** (for Unknown/Error);
-  - **Evidence**, in a monospace block;
-  - **What you can do**. Doctor never runs these steps itself.
+The window's words for the report's severities (`--text`, `--summary` and JSON
+keep the severities, see [Severity](#severity--what-each-level-promises)):
 
-  With no row selected, the pane shows the overview: the headline, counts,
-  every group's worst status, the checks that do not apply here, and a legend
-  of status levels.
-- **Filter:** free text across title, summary, evidence and guidance.
-  - Also `is:problem`, `is:warn`, `is:error`, `is:unknown`, `is:pass`.
-  - The status chips (Error, Warning, Unknown, Info, Pass, each with its count
-    and a coloured dot) show or hide each level.
-- **Scan / Cancel:** scans run on a worker thread, so the window never blocks.
-  The primary button reads **Scan again** after the first scan.
-  - Refreshing while a scan is running is ignored.
-  - Cancel stops in-flight commands. Unfinished checks become Unknown and the
-    report is marked incomplete.
-  - Closing the window mid-scan cancels the scan and closes once the worker
-    has stopped. A running thread is never destroyed.
-- **Copy summary:** copies a **redacted** summary.
+| Condition | Severity | Means |
+|---|---|---|
+| **Needs treatment** | ERROR | a problem that is likely to break something or put the system at risk |
+| **Keep an eye on it** | WARN | not urgent, but it may need care |
+| **Couldn't examine** | UNKNOWN | a missing tool, permission or unsupported format; never a clean bill of health |
+| **Note** | INFO | worth knowing, not a problem |
+| **Healthy** | PASS | examined and healthy |
+
+- **Header:** the Doctor NoX icon, the distribution · image type · kernel, and
+  the overall condition as a coloured pill with a plain-language headline:
+  - **Needs treatment**: at least one test needs treatment;
+  - **Needs attention**: at least one to keep an eye on;
+  - **Couldn't examine everything**: at least one test couldn't be examined;
+  - **In good health**: otherwise.
+
+  The time and duration of the last checkup sit under the pill.
+- **What's wrong?** Tell the doctor the complaint: *It's slow or freezes*, *No
+  sound*, *No internet*, *Updates won't install*, *Graphics or games act up*,
+  *Something crashes or won't start*, or *Just a checkup*.
+  - The findings list then shows the tests that bear on the complaint, and the
+    verdict speaks to it: what those tests found, and what needs a look
+    elsewhere.
+  - Every checkup still runs every test; the complaint only chooses what is
+    shown. *Just a checkup* shows them all.
+  - When the tests for a complaint all come back fine, the verdict says the
+    cause is somewhere Doctor NoX can't see, rather than that nothing is wrong.
+- **Start checkup / Cancel:** a checkup runs on a worker thread, so the window
+  never blocks. The primary button reads **New checkup** after the first one.
+  - Starting one while another is running is ignored.
+  - Cancel stops in-flight commands. Unfinished tests become **Couldn't
+    examine** and the checkup is marked as stopped early.
+  - Closing the window mid-checkup cancels it and closes once the worker has
+    stopped. A running thread is never destroyed.
+- **Copy doctor's note:** copies a **redacted** note: the verdict, what changed
+  since the last checkup, and every finding that isn't simply healthy, each
+  with its diagnosis and treatment.
 - **Export:**
   - redacted report for sharing (.txt / .json);
   - full local report (.json / .txt), saved with mode 0600;
   - copy the full report to the clipboard.
 - **View:** **Appearance** (Match system / Light / Dark) and **About**.
+- **Vital signs:** four readings from the last checkup, each edged in its
+  condition's colour. A click opens the test behind a reading.
+
+  | Vital sign | Shows | From |
+  |---|---|---|
+  | Temperature | the hottest sensor | `hardware.sensors` |
+  | Memory | memory free of the total | `hardware.cpu_memory` |
+  | Disk space | the filesystem that is worst off | `storage.space` |
+  | Restart | whether a restart is waiting | `updates.reboot`, or `system.image.pending` on image-based systems |
+
+  A sign no test measured on this system reads **Not examined**; one that
+  couldn't be read reads **Couldn't read**.
+- **Find and conditions:** free text across title, finding, what was found and
+  treatment.
+  - Also `is:problem`, and a condition by either name: `is:error` or
+    `is:treat`, `is:warn` or `is:watch`, `is:unknown`, `is:info` or `is:note`,
+    `is:pass` or `is:healthy`.
+  - The condition chips (each with its count and a coloured dot) show or hide
+    the findings in that condition.
+- **Areas examined (left):** Diagnosis, System, Updates & Packages, Security &
+  Services, Hardware & Gaming, Storage, Apps, Network, Logs.
+  - An area with problems shows a pill with how many of its tests need
+    treatment, an eye kept on them, or couldn't be examined, coloured by the
+    worst one.
+  - An area where every test came back fine shows a green **OK** pill.
+- **Findings (centre):** sorted most-urgent first, with a condition pill per
+  row and alternating row shading. The condition is always spelled out in
+  text, never conveyed by colour alone. After a follow-up, a **Since last
+  checkup** column marks what got **Worse** or **Better**.
+- **Diagnosis and treatment (right, or below on narrow windows):** for the
+  selected test:
+  - its condition, the finding and what that condition means;
+  - whether it got better or worse since the last checkup;
+  - **Diagnosis** (why, when there is a reason to give);
+  - **What I found**, in a monospace block;
+  - **Treatment**, or "None needed" for a healthy test. Doctor NoX never
+    carries these steps out itself.
+
+  With no test selected, the pane shows the diagnosis for the whole checkup:
+  - the headline and the **verdict**, a few sentences saying what needs
+    treatment, what to keep an eye on, where to start, and what couldn't be
+    examined;
+  - **Since your last checkup**, when there is one to compare with;
+  - every area's worst condition, the tests that don't apply here, and what
+    the conditions mean.
 - **Status bar:** progress and results messages on the left. The right side
-  always shows "Read-only · No root · No network requests · Nothing is
-  uploaded".
+  always shows "Examines only: needs no root, makes no network requests,
+  uploads nothing, changes nothing".
 - **Keyboard:**
 
   | Key | Action |
   |---|---|
-  | Ctrl+F | filter |
-  | F5 or Ctrl+R | scan |
-  | Esc | cancel, or clear the filter |
-  | Ctrl+Shift+C | copy summary |
+  | Ctrl+F | find in the findings |
+  | F5 or Ctrl+R | start a checkup |
+  | Esc | cancel, or clear the search |
+  | Ctrl+Shift+C | copy the doctor's note |
   | Ctrl+S | save redacted report |
   | F1 | about |
   | Ctrl+Q | quit |
 
-  Arrow keys move through groups and results. Every interactive widget has an
+  Arrow keys move through areas and findings. Every interactive widget has an
   accessible name, and keyboard focus is shown as an accent-coloured outline.
+  The vital signs are a pointer shortcut; the tests behind them are in the
+  findings list.
+
+### Follow-ups: the one file Doctor NoX keeps
+
+To say what changed, the window remembers the last checkup that finished:
+
+- **Where:** `$XDG_STATE_HOME/doctor-nox/last-checkup.json`, which is
+  `~/.local/state/doctor-nox/last-checkup.json` unless you set it otherwise.
+  The file is readable only by you (mode 0600).
+- **What:** the time of the checkup and one condition per test ID. No
+  evidence, names, addresses or log lines.
+- **When:** only the window writes it, after a checkup that finished. A
+  checkup that was stopped early is neither remembered nor compared. The
+  command line, the self-tests and screenshot mode never write it.
+- **How it is used:** the next checkup is compared with it. A test that got
+  more or less urgent is **Worse** or **Better**. One that couldn't be
+  examined this time is reported as that, never as better.
+- Deleting the file is safe: the next checkup has nothing to compare with and
+  starts a new record.
 
 ### Appearance
 
@@ -346,6 +422,10 @@ settings and says so.
   bootc or rpm-ostree transactions, no module loads, no `systemctl
   start/stop/enable/mask/daemon-reload/reset-failed`, no reboot, no chmod,
   no cleanup.
+- **Two things are ever written,** both in your own files and both atomically:
+  a report where you choose to save it (`report.py`), and the window's record
+  of the last checkup (`record.py`). A test checks that no other module
+  writes.
 - **Command allowlist with argument patterns.** `doctor_nox/runner.py`
   declares every executable *and* every permitted argument list. Unit names,
   rpm packages, kernel modules and modinfo fields come from fixed sets.
@@ -436,6 +516,9 @@ doctor_nox/
   engine.py     applicability, 4 workers, isolation, progress, cancellation, deadline
   report.py     text / JSON / redaction / atomic export
   viewmodel.py  Qt-free filtering, grouping, badges, detail HTML (unit-tested)
+  clinic.py     Qt-free doctor's side: verdict, vital signs, complaints,
+                follow-ups, the doctor's note (unit-tested)
+  record.py     the one file the window keeps: the last checkup's conditions
   theme.py      Qt-free light/dark palettes, status colours, WCAG contrast helper
   gui.py        PySide6 Qt Widgets window, stylesheet, status-pill delegates,
                 worker thread, self-test, synthetic-data screenshots
@@ -546,8 +629,16 @@ What the tests cover:
   - the engine and the command line hand over to the host;
   - `hostrun.py` refuses old Pythons, and is checked against Python 3.6's
     grammar.
+- **The doctor's side:** the verdict's sentences, complaints (every test a
+  complaint or vital sign names must exist), follow-ups (a test that can't be
+  examined is never "better"), the doctor's note, and the record (private,
+  atomic, finished checkups only, written by the window alone). Vital signs
+  are read from the real probes' results, so a reworded probe fails a test.
 - **GUI self-test:** uses synthetic probes to load, filter, select, export,
   rescan, ignore a rapid refresh, cancel, and close while scanning.
+  - It checks the doctor's wording, the verdict, the vital signs, a complaint,
+    a follow-up against a remembered checkup in a temporary directory, and
+    that every control fits in the window.
   - It also switches to Light, Dark and Match system and renders the whole
     window in each.
   - It fails if a delegate raised a paint error or Qt could not parse a
