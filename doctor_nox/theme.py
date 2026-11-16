@@ -46,11 +46,10 @@ HEADLINE = {ERROR: "Needs treatment", WARN: "Needs attention", UNKNOWN: "Couldn'
 # What each condition means, in the doctor's words (the legend and the line under a result).
 STATUS_MEANING = {
     PASS: "Examined and healthy.",
-    INFO: "Examined; worth knowing, not a problem (for example automatic updates being off).",
-    WARN: "Examined; not urgent, but it may need care.",
-    ERROR: "Examined; a problem that is likely to break something or put the system at risk.",
-    UNKNOWN: "Couldn't be examined (a missing tool, a permission, an unsupported format). "
-             "That is not a clean bill of health.",
+    INFO: "Worth knowing, not a problem.",
+    WARN: "Not urgent, but it may need care.",
+    ERROR: "Likely to break something or put the system at risk.",
+    UNKNOWN: "A tool or permission was missing, so this is not a clean bill of health.",
 }
 
 

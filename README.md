@@ -78,19 +78,23 @@ a checkup and talks you through it like a doctor:
 
 - **The verdict** comes first, in plain sentences: what needs treatment, what
   to keep an eye on, where to start, and what it couldn't examine.
-- **What's wrong?** Tell it the complaint (no sound, no internet, updates
-  won't install, slow, graphics, crashes) and it shows the tests that bear on
-  it and speaks to that.
-- **Vital signs** stay in view: temperature, memory, disk space, and whether a
-  restart is waiting.
+- **What's wrong?** Type it in your own words ("no sound", "my wifi keeps
+  dropping", "games stutter") or pick from the list. It shows the tests that
+  bear on it and speaks to that. Your words are matched on your PC; nothing is
+  sent anywhere.
+- **Heart monitor and vital signs** stay in view: a trace in the overall
+  condition's colour that sweeps during a checkup, and temperature, memory,
+  disk space, and whether a restart is waiting.
 - **Each finding** has a diagnosis, what was found, and a treatment. Doctor
   NoX never carries a treatment out itself.
 - **Follow-ups:** it remembers the last checkup on this PC and says what got
   better or worse since.
 
-It has light and dark themes and follows your desktop by default. The main
-actions have shortcuts: F5 starts a checkup, Ctrl+F finds, Ctrl+S saves a
-redacted report.
+**Settings** (Menu → Settings, Ctrl+,) are yours: light, dark or follow the
+desktop; whether a checkup starts when it opens; whether it remembers
+checkups; which areas it examines and for how long; whether the monitor
+animates. The main actions have shortcuts: F5 starts a checkup, Ctrl+L types
+what's wrong, Ctrl+F finds, Ctrl+S saves a redacted report.
 
 From a terminal:
 
@@ -122,10 +126,11 @@ only where you choose, readable only by you (mode 0600).
 
 - **Read-only.** No sudo or Polkit, no package installs or removals, no
   bootc or rpm-ostree changes, no `systemctl start/stop/enable`, no reboots.
-  It writes two things only, both in your own files: a report you save, and
-  the window's record of your last checkup
+  It writes three things only, all in your own files: a report you save, the
+  window's record of your last checkup
   (`~/.local/state/doctor-nox/last-checkup.json`: a time and one condition per
-  test, nothing else), which is what follow-ups compare with.
+  test, nothing else; you can turn it off), and your settings
+  (`~/.config/doctor-nox/settings.json`).
 - **Allowlisted commands.** Every program Doctor may run, and every argument
   list it may use, is declared in [`doctor_nox/runner.py`](doctor_nox/runner.py):
   queries such as `rpm -q`, `dpkg --audit`, `pacman -Qdtq`, `rpm-ostree status`

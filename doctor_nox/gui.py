@@ -18,16 +18,17 @@ from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
                            QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QStyle,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
+                               QPushButton, QRadioButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTextBrowser, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_ID, VERSION
-from . import clinic, engine, record, report as reports, theme as themes, viewmodel as vm
+from . import clinic, engine, record, report as reports, settings as settings_store, theme as themes, viewmodel as vm
 from .context import Context
-from .model import CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
+from .model import CATEGORIES, CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
 from .theme import STATUS_TEXT, Theme
 
 # Doctor's own identity (the NoX icon), independent of any distribution logo.
@@ -38,8 +39,8 @@ SEV_ROLE = Qt.ItemDataRole.UserRole + 1         # results table: severity key of
 NAV_BADGE_ROLE = Qt.ItemDataRole.UserRole + 2   # sidebar: pill text ("3", "OK", "")
 NAV_SEV_ROLE = Qt.ItemDataRole.UserRole + 3     # sidebar: pill severity ("" for none)
 CHANGE_COLUMN = 4                               # results table: "Since last checkup"
-SUBTITLE = "A doctor for your PC: it examines and prescribes, and never operates"
-SAFETY_NOTE = "Examines only: needs no root, makes no network requests, uploads nothing, changes nothing"
+SUBTITLE = "A doctor for your PC. Examines and prescribes; never operates."
+SAFETY_NOTE = "Examines only · no root · no network requests · nothing uploaded or changed"
 QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (stylesheet parse errors fail the test)
 
 
@@ -384,7 +385,7 @@ class VitalTile(QFrame):
     """
     clicked = Signal(str)
 
-    def __init__(self, label: str, parent=None):
+    def __init__(self, label: str, mono: str = "", parent=None):
         super().__init__(parent, objectName="vital")
         self.label = label
         self.finding_id = ""
@@ -395,7 +396,10 @@ class VitalTile(QFrame):
         self.caption = QLabel(label, objectName="vitalLabel")
         self.caption.setFont(scaled_font(self.font(), 0.92))
         self.value = QLabel(self.reading)
-        self.value.setFont(scaled_font(self.font(), 1.1, QFont.Weight.DemiBold))
+        reading_font = scaled_font(self.font(), 1.1, QFont.Weight.DemiBold)
+        if mono:
+            reading_font.setFamily(mono)  # figures line up, as on a bedside monitor
+        self.value.setFont(reading_font)
         # The reading may be clipped, never a reason for the window to grow.
         self.value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.value.setMinimumWidth(40)
@@ -429,6 +433,184 @@ class VitalTile(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class PulseLine(QWidget):
+    """The heart monitor in the header: an ECG trace in the overall condition's colour.
+
+    While a checkup runs, a bright head sweeps along it as on a bedside monitor; otherwise it is
+    still. It is decoration: the condition is always written beside it. Paint errors never crash
+    the window; they are recorded like the delegates' (the self-test asserts there are none).
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self.colour = ""
+        self.running = False
+        self.motion = True
+        self.phase = 0.0
+        self.timer = QTimer(self)
+        self.timer.setInterval(40)
+        self.timer.timeout.connect(self._tick)
+        self.setMinimumSize(60, 34)
+        self.setMaximumHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName("Heart monitor")
+
+    def sizeHint(self):
+        return QSize(240, 36)
+
+    def set_state(self, colour: str, running: bool, motion: bool):
+        self.colour, self.running, self.motion = colour, running, motion
+        if running and motion:
+            if not self.timer.isActive():
+                self.timer.start()
+        else:
+            self.timer.stop()
+            self.phase = 0.0
+        self.setAccessibleDescription("Examining" if running else "At rest")
+        self.update()
+
+    def _tick(self):
+        self.phase = (self.phase + 0.0125) % 1.0
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        try:
+            points = clinic.pulse(self.width(), self.height())
+            if len(points) < 2 or not self.colour:
+                return
+            path = QPainterPath(QPointF(*points[0]))
+            for x, y in points[1:]:
+                path.lineTo(x, y)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            colour = QColor(self.colour)
+            pen = QPen(colour, 1.6)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            if not (self.running and self.motion):
+                painter.setPen(pen)
+                painter.drawPath(path)
+                return
+            head = self.phase * self.width()
+            faint = QColor(colour)
+            faint.setAlphaF(0.28)
+            old = QPen(pen)
+            old.setColor(faint)
+            painter.setClipRect(QRectF(head + 18, 0, self.width(), self.height()))  # the last sweep, fading
+            painter.setPen(old)
+            painter.drawPath(path)
+            painter.setClipRect(QRectF(0, 0, head, self.height()))                  # this sweep
+            painter.setPen(pen)
+            painter.drawPath(path)
+            painter.setClipping(False)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(colour))
+            painter.drawEllipse(QPointF(head, clinic.pulse_y(points, head)), 2.4, 2.4)
+        except Exception:
+            self._window.paint_errors.append(traceback.format_exc())
+            print(f"Doctor NoX: paint error\n{self._window.paint_errors[-1]}", file=sys.stderr, flush=True)
+        finally:
+            painter.end()
+
+
+class SettingsDialog(QDialog):
+    """Your settings. Nothing changes until OK; Cancel leaves everything as it was."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setWindowTitle("Doctor NoX settings")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+
+        def heading(text):
+            label = QLabel(text)
+            label.setFont(scaled_font(self.font(), 1.05, QFont.Weight.DemiBold))
+            layout.addSpacing(6)
+            layout.addWidget(label)
+
+        def hint(text):
+            label = QLabel(text, objectName="subtitle", wordWrap=True)
+            layout.addWidget(label)
+
+        heading("Appearance")
+        row = QHBoxLayout()
+        self.theme_buttons = {}
+        group = QButtonGroup(self)
+        for mode in themes.MODES:
+            button = QRadioButton(themes.MODE_LABEL[mode])
+            group.addButton(button)
+            row.addWidget(button)
+            self.theme_buttons[mode] = button
+        row.addStretch(1)
+        layout.addLayout(row)
+        hint("Match system follows your desktop's light or dark setting, and switches when it does.")
+        if window.theme_locked:
+            hint(f"{themes.ENV_MODE} is set in the environment, so it decides the theme until it is removed.")
+        self.motion = QCheckBox("Animate the heart monitor during a checkup")
+        layout.addWidget(self.motion)
+
+        heading("Checkups")
+        self.at_launch = QCheckBox("Start a checkup when Doctor NoX opens")
+        layout.addWidget(self.at_launch)
+        self.remember = QCheckBox("Remember my last checkup, to say what got better or worse")
+        layout.addWidget(self.remember)
+        hint("Turning this off deletes the remembered checkup.")
+        limit = QHBoxLayout()
+        limit.addWidget(QLabel("Stop a checkup after"))
+        self.deadline = QSpinBox()
+        self.deadline.setRange(*settings_store.DEADLINE_RANGE)
+        self.deadline.setSuffix(" seconds")
+        self.deadline.setAccessibleName("Stop a checkup after this many seconds")
+        limit.addWidget(self.deadline)
+        limit.addStretch(1)
+        layout.addLayout(limit)
+
+        heading("Areas to examine")
+        grid = QGridLayout()
+        self.area_boxes = {}
+        for i, (key, title) in enumerate(CATEGORIES):
+            box = QCheckBox(title)
+            grid.addWidget(box, i // 2, i % 2)
+            self.area_boxes[key] = box
+        layout.addLayout(grid)
+        hint("An area you turn off is left out of every checkup. With all of them off, all are examined.")
+
+        layout.addSpacing(8)
+        standard = QDialogButtonBox.StandardButton
+        buttons = QDialogButtonBox(standard.Ok | standard.Cancel | standard.RestoreDefaults)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(standard.RestoreDefaults).clicked.connect(self.restore_defaults)
+        layout.addWidget(buttons)
+        self.set_values(window.settings)
+
+    def restore_defaults(self):
+        self.set_values(settings_store.clean(None))
+
+    def set_values(self, values: dict):
+        values = settings_store.clean(values)
+        for mode, button in self.theme_buttons.items():
+            button.setChecked(mode == values["theme"])
+        self.motion.setChecked(values["monitor_motion"])
+        self.at_launch.setChecked(values["checkup_at_launch"])
+        self.remember.setChecked(values["remember"])
+        self.deadline.setValue(values["deadline"])
+        for key, box in self.area_boxes.items():
+            box.setChecked(key not in values["skip_areas"])
+
+    def values(self) -> dict:
+        theme = next((mode for mode, button in self.theme_buttons.items() if button.isChecked()), themes.SYSTEM)
+        return settings_store.clean({
+            "theme": theme, "monitor_motion": self.motion.isChecked(),
+            "checkup_at_launch": self.at_launch.isChecked(), "remember": self.remember.isChecked(),
+            "deadline": self.deadline.value(),
+            "skip_areas": [key for key, box in self.area_boxes.items() if not box.isChecked()]})
+
+
 class ScanThread(QThread):
     """Runs engine.scan off the GUI thread.
 
@@ -443,10 +625,11 @@ class ScanThread(QThread):
     failed = Signal(str, int)
     done = Signal(int)  # always the last thing run() does, after completed/failed
 
-    def __init__(self, generation: int, scan_func, context_factory, parent=None):
+    def __init__(self, generation: int, scan_func, context_factory, parent=None, options=None):
         super().__init__(parent)
         self.generation = generation
         self._scan = scan_func
+        self._options = dict(options or {})  # areas and time limit from your settings; {} for the defaults
         self.ctx = context_factory()
 
     def cancel(self):
@@ -455,7 +638,7 @@ class ScanThread(QThread):
     def run(self):
         try:
             # This callback runs on the scan thread; it only emits (thread-safe), never touches widgets.
-            result = self._scan(self.ctx, progress=self._emit_progress)
+            result = self._scan(self.ctx, progress=self._emit_progress, **self._options)
             self.completed.emit(result, self.generation)
         except Exception as exc:  # surfaced in the UI, never a crash
             self.failed.emit(f"{type(exc).__name__}: {exc}", self.generation)
@@ -469,12 +652,17 @@ class ScanThread(QThread):
 # ── window ───────────────────────────────────────────────────────────────────
 class Window(QMainWindow):
     def __init__(self, *, scan_func=engine.scan, context_factory=Context, autoscan=True, interactive=True,
-                 record_path=None):
+                 record_path=None, settings_path=None):
         super().__init__()
         self.interactive = interactive        # False in self-tests: never open modal dialogs
+        # Your settings (None: the defaults, and nothing is written).
+        self.settings_path = settings_path
+        self.settings = settings_store.load(settings_path)
+        self.report_skipped: list[str] = []   # areas left out of the checkup on screen
+        self._starting_skipped: list[str] = []
         # Follow-ups: where the last checkup is remembered (None: nowhere, nothing is written).
-        self.record_path = record_path
-        self.remembered = record.load(record_path)  # the checkup the next one is compared with
+        self.record_file = record_path
+        self.remembered = record.load(self.record_path)  # the checkup the next one is compared with
         self.follow = None                    # clinic.follow_up() for the report on screen
         self.symptom = clinic.GENERAL         # "What's wrong?"
         self.workers: dict[int, ScanThread] = {}  # every thread not yet joined, by generation
@@ -494,7 +682,10 @@ class Window(QMainWindow):
         self.selected_id = ""
         # The desktop's palette before Doctor applies its own; used to follow the system scheme.
         self._system_palette = QPalette(QGuiApplication.palette())
-        self.theme_mode = themes.requested_mode()
+        # DOCTOR_NOX_THEME, when set, decides the theme; otherwise your setting does.
+        asked = os.environ.get(themes.ENV_MODE, "").strip().lower()
+        self.theme_locked = asked in themes.MODES
+        self.theme_mode = asked if self.theme_locked else self.settings["theme"]
         self.theme: Theme = themes.resolve(self.theme_mode, system_prefers_dark(self._system_palette))
         self.mono = mono_family()
         self.pill_width = 0
@@ -509,8 +700,13 @@ class Window(QMainWindow):
         if hasattr(hints, "colorSchemeChanged"):
             hints.colorSchemeChanged.connect(self._system_scheme_changed)
         self.apply_theme()
-        if autoscan:
+        if autoscan and self.settings["checkup_at_launch"]:
             QTimer.singleShot(0, self.start_scan)
+
+    @property
+    def record_path(self):
+        """Where the last checkup is remembered, or None when that is off."""
+        return self.record_file if self.settings["remember"] else None
 
     # layout ------------------------------------------------------------------
     def _build(self):
@@ -536,7 +732,8 @@ class Window(QMainWindow):
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
         head.addLayout(titles)
-        head.addStretch(1)
+        self.pulse = PulseLine(self)
+        head.addWidget(self.pulse, 1)
         right = QVBoxLayout()
         right.setSpacing(4)
         self.verdict = QLabel("—", objectName="verdict", alignment=Qt.AlignmentFlag.AlignCenter)
@@ -550,11 +747,18 @@ class Window(QMainWindow):
         # The consultation: what's wrong on the left, the checkup and its paperwork on the right.
         consult = QHBoxLayout()
         consult.setSpacing(8)
+        self.complaint = QLineEdit(placeholderText="What's wrong? Type it (“no sound”, “wifi keeps dropping”) "
+                                                   "and press Enter")
+        self.complaint.setClearButtonEnabled(True)
+        self.complaint.setMinimumWidth(200)
+        self.complaint.setAccessibleName("What's wrong? Type it in your own words")
+        self.complaint.returnPressed.connect(self.describe)
+        consult.addWidget(self.complaint, 1)
         self.symptom_btn = QToolButton(objectName="menuButton")
         self.symptom_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.symptom_btn.setToolTip("Tell the doctor what's wrong: the tests that bear on it are shown, "
+        self.symptom_btn.setToolTip("Or pick what's wrong: the tests that bear on it are shown, "
                                     "and the verdict speaks to it")
-        self.symptom_btn.setAccessibleName("What's wrong?")
+        self.symptom_btn.setAccessibleName("Pick what's wrong")
         complaints = QMenu(self.symptom_btn)
         complaint_group = QActionGroup(complaints)
         complaint_group.setExclusive(True)
@@ -567,7 +771,6 @@ class Window(QMainWindow):
             self.symptom_actions[symptom.key] = act
         self.symptom_btn.setMenu(complaints)
         consult.addWidget(self.symptom_btn)
-        consult.addStretch(1)
         self.progress = QProgressBar(maximumWidth=140, visible=False)
         self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
@@ -605,11 +808,14 @@ class Window(QMainWindow):
         self.export_btn.setMenu(menu)
         self.export_btn.setAccessibleName("Export report")
         consult.addWidget(self.export_btn)
-        self.more_btn = QToolButton(text="View", objectName="menuButton")
+        self.more_btn = QToolButton(text="Menu", objectName="menuButton")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.more_btn.setToolTip("Appearance and information about Doctor NoX")
-        self.more_btn.setAccessibleName("View options")
+        self.more_btn.setToolTip("Settings, appearance and information about Doctor NoX")
+        self.more_btn.setAccessibleName("Menu")
         more = QMenu(self.more_btn)
+        preferences = QAction("Settings…", more)
+        preferences.triggered.connect(self.open_settings)
+        more.addAction(preferences)
         appearance = more.addMenu("Appearance")
         group = QActionGroup(appearance)
         group.setExclusive(True)
@@ -633,7 +839,7 @@ class Window(QMainWindow):
         vital_row.setSpacing(8)
         self.vital_tiles = {}
         for vital in clinic.vitals(None):
-            tile = VitalTile(vital["label"])
+            tile = VitalTile(vital["label"], self.mono)
             tile.clicked.connect(self.open_finding)
             self.vital_tiles[vital["key"]] = tile
             vital_row.addWidget(tile, 1)
@@ -745,7 +951,38 @@ class Window(QMainWindow):
     # theme -------------------------------------------------------------------
     def set_theme_mode(self, mode: str):
         self.theme_mode = mode if mode in themes.MODES else themes.SYSTEM
+        if self.settings["theme"] != self.theme_mode:
+            self.settings["theme"] = self.theme_mode
+            settings_store.save(self.settings_path, self.settings)
         self.apply_theme()
+
+    def open_settings(self):
+        """The settings dialog. In self-tests it is returned unopened, to be driven without a modal loop."""
+        dialog = SettingsDialog(self)
+        if not self.interactive:
+            return dialog
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_settings(dialog.values())
+        dialog.deleteLater()
+        return None
+
+    def apply_settings(self, values: dict):
+        was, new = self.settings, settings_store.clean(values)
+        self.settings = new
+        saved = settings_store.save(self.settings_path, new)
+        if was["remember"] and not new["remember"]:
+            record.forget(self.record_file)
+            self.remembered = self.follow = None
+        elif new["remember"] and not was["remember"] and self.report and record.save(self.record_path, self.report):
+            self.remembered = record.snapshot(self.report)
+        if not self.theme_locked:
+            self.theme_mode = new["theme"]
+        self.apply_theme()  # renders everything again, the heart monitor included
+        message = ("Settings saved." if saved or self.settings_path is None
+                   else "Settings apply now, but they couldn't be saved.")
+        if (new["skip_areas"], new["deadline"]) != (was["skip_areas"], was["deadline"]):
+            message += " Areas and the time limit apply from the next checkup."
+        self.statusBar().showMessage(message)
 
     def _system_scheme_changed(self, *_args):
         if self.theme_mode == themes.SYSTEM:
@@ -777,6 +1014,8 @@ class Window(QMainWindow):
                            (QKeySequence(Qt.Key.Key_Escape), self._escape),
                            (QKeySequence("Ctrl+Shift+C"), self.copy_note),
                            (QKeySequence.StandardKey.Save, lambda: self.export(True, "text")),
+                           (QKeySequence("Ctrl+,"), self.open_settings),
+                           (QKeySequence("Ctrl+L"), self.complaint.setFocus),
                            (QKeySequence.StandardKey.HelpContents, self.show_about),
                            (QKeySequence.StandardKey.Quit, self.close)):
             QShortcut(keys, self, activated=slot)
@@ -799,7 +1038,9 @@ class Window(QMainWindow):
         self.generation += 1
         self.busy = True
         self.last_error = ""
-        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self)
+        self._starting_skipped = list(self.settings["skip_areas"])
+        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self,
+                            options=settings_store.scan_options(self.settings))
         queued = Qt.ConnectionType.QueuedConnection  # receiver: this window, in the GUI thread
         worker.progressed.connect(self._progress, queued)
         worker.completed.connect(self._completed, queued)
@@ -852,6 +1093,7 @@ class Window(QMainWindow):
         # A checkup that was stopped early has unfinished tests; comparing it would call them changes.
         self.follow = clinic.follow_up(result, self.remembered) if result["complete"] else None
         self.report = result
+        self.report_skipped = self._starting_skipped
         if record.save(self.record_path, result):
             self.remembered = record.snapshot(result)
         when = datetime.datetime.now().strftime("%H:%M")
@@ -943,7 +1185,11 @@ class Window(QMainWindow):
         self.scan_btn.setText("New checkup" if self.report else "Start checkup")
         self.copy_btn.setEnabled(self.report is not None)
         self.export_btn.setEnabled(self.report is not None)
-        self.symptom_btn.setText(f"What's wrong?  {clinic.SYMPTOM[self.symptom].label}")
+        self.symptom_btn.setText(clinic.SYMPTOM[self.symptom].label)
+        t = self.theme
+        resting = t.status[self.report["overall"]].fg if self.report else t.subtle
+        self.pulse.set_state(t.accent if self.scanning() else resting, self.scanning(),
+                             self.settings["monitor_motion"])
         for key, action in self.symptom_actions.items():
             action.setChecked(key == self.symptom)
         for vital in clinic.vitals(self.report):
@@ -1006,15 +1252,31 @@ class Window(QMainWindow):
                 self.details.setHtml(vm.error_html(self.last_error, self.theme))
             else:
                 self.details.setHtml(vm.overview_html(self.report, self.scanning(), self.theme, self.follow,
-                                                      self.symptom))
+                                                      self.symptom, skipped_areas=self.report_skipped))
 
     def _toggle_severity(self, sev, on):
         (self.severities.add if on else self.severities.discard)(sev)
         self.render_list()
 
-    def set_symptom(self, key: str):
+    def describe(self, text: str | None = None):
+        """What's wrong, in the person's own words: find the complaint they mean."""
+        typed = (self.complaint.text() if text is None else text).strip()
+        key = clinic.guess(typed)
+        if key:
+            self.set_symptom(key, typed=True)
+            self.statusBar().showMessage(f"I took that as “{clinic.SYMPTOM[key].label}”. "
+                                         "Pick another from the list if I got it wrong.")
+        else:
+            self.set_symptom(clinic.GENERAL, typed=True)
+            if typed:
+                self.statusBar().showMessage("I have no tests for that, so here is the whole checkup. "
+                                             + clinic.ASK_FOR_HELP)
+
+    def set_symptom(self, key: str, typed: bool = False):
         """What's wrong? Shows the tests that bear on it, and the verdict speaks to it."""
         self.symptom = key if key in clinic.SYMPTOM else clinic.GENERAL
+        if not typed:
+            self.complaint.clear()
         if self.symptom == clinic.GENERAL:
             self.statusBar().showMessage("Showing the whole checkup.")
         else:
@@ -1039,6 +1301,7 @@ class Window(QMainWindow):
         self.severities = set(SEVERITIES)
         self.category = vm.OVERVIEW
         self.symptom = clinic.GENERAL
+        self.complaint.clear()
         self.selected_id = finding_id
         self.render_all()
         if self.tree.currentItem() is not None:
@@ -1134,8 +1397,8 @@ class Window(QMainWindow):
                 f"every treatment is yours to carry out. For Fedora (including Atomic and bootc), Debian and "
                 f"Ubuntu, Arch and openSUSE, with general tests everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. Reports are written only where "
-                f"you choose. To follow up, it keeps one small file of its own: the conditions found at your "
-                f"last checkup.</p>{sandboxed}"
+                f"you choose. It keeps two small files of its own: your settings and, unless you turn that off, "
+                f"the conditions found at your last checkup.</p>{sandboxed}"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION}, {qt}, "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
@@ -1155,7 +1418,7 @@ def _application():
 def run() -> int:
     import signal
     app = _application()
-    window = Window(record_path=record.default_path())
+    window = Window(record_path=record.default_path(), settings_path=settings_store.default_path())
     app.aboutToQuit.connect(window.shutdown)
     # Ctrl+C in the launching terminal: close like the user would (deferred while scanning).
     signal.signal(signal.SIGINT, lambda *_: window.close())
@@ -1375,8 +1638,8 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     probes = [Probe("fixture.fast", "system", "fixture", fixture_probe),
               Probe("fixture.slow", "logs", "slow", slow_probe)]
 
-    def scan(ctx, progress=None):
-        return engine.scan(ctx, progress=progress, probes=probes, deadline=30)
+    def scan(ctx, progress=None, selected=None, deadline=30):
+        return engine.scan(ctx, progress=progress, probes=probes, deadline=min(deadline, 30), selected=selected)
 
     def fixture_context():
         return Context(root=Path(tempfile.gettempdir()) / "doctor-nox-no-host", user="alice", hostname="ws")
@@ -1405,8 +1668,9 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
         "version": record.VERSION, "generated_at": "2026-01-01T00:00:00+00:00",
         "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}))
 
+    settings_path = Path(records.name) / "config" / settings_store.FILE_NAME
     window = Window(scan_func=scan, context_factory=fixture_context, autoscan=False, interactive=False,
-                    record_path=record_path)
+                    record_path=record_path, settings_path=settings_path)
     window.show()
     app.processEvents()
     log("window shown")
@@ -1454,12 +1718,54 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     note = window.note_text()
     check("doctor's note" in note and "NEEDS TREATMENT" in note and "alice" not in note and "10.1.2.3" not in note,
           "the doctor's note is in the doctor's words and redacted")
+    window.describe("my wifi keeps dropping")
+    app.processEvents()
+    check(window.symptom == "network" and window.tree.topLevelItemCount() == 1,
+          "what's wrong can be typed in your own words")
+    window.describe("my printer is haunted")
+    app.processEvents()
+    check(window.symptom == clinic.GENERAL and window.tree.topLevelItemCount() == 6,
+          "a complaint with no tests shows the whole checkup")
+    check(not window.pulse.running and not window.pulse.timer.isActive() and window.pulse.colour
+          == window.theme.status["error"].fg, "the heart monitor rests in the condition's colour")
+
+    # 1c. settings: they apply, are saved, and can be put back
+    dialog = window.open_settings()
+    check(dialog is not None and dialog.values() == window.settings == settings_store.clean(None),
+          "settings open with the defaults")
+    dialog.theme_buttons["light"].setChecked(True)
+    dialog.area_boxes["logs"].setChecked(False)
+    dialog.remember.setChecked(False)
+    dialog.motion.setChecked(False)
+    dialog.deadline.setValue(20)
+    window.apply_settings(dialog.values())
+    app.processEvents()
+    kept = settings_store.load(settings_path)
+    check(window.theme is themes.LIGHT_THEME and kept["theme"] == "light" and kept["skip_areas"] == ["logs"]
+          and kept["deadline"] == 20 and oct(settings_path.stat().st_mode & 0o777) == "0o600",
+          "settings apply at once and are saved, privately")
+    check(not record_path.exists() and window.follow is None and window.record_path is None,
+          "turning off remembering deletes the remembered checkup")
+    window.start_scan()
+    check(pump(lambda: not window.scanning() and window.report is not None
+               and len(window.report["findings"]) == 5), "an area turned off is left out of the checkup")
+    check("Left out by your settings" in window.details.toPlainText() and not record_path.exists(),
+          "the diagnosis says what was left out, and nothing is remembered")
+    dialog.restore_defaults()
+    window.apply_settings(dialog.values())
+    dialog.deleteLater()
+    app.processEvents()
+    check(window.settings == settings_store.clean(None) and settings_store.load(settings_path) == window.settings
+          and record_path.exists(), "restoring the defaults puts everything back, remembering included")
+    log("settings done")
+
     remembered_at = record_path.stat().st_mtime_ns
     window.resize(1240, 780)
     app.processEvents()
     inside = window.rect()
-    parts = [window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn, window.more_btn,
-             window.search, *window.sev_buttons.values(), *window.vital_tiles.values()]
+    parts = [window.complaint, window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn,
+             window.more_btn, window.pulse, window.search, *window.sev_buttons.values(),
+             *window.vital_tiles.values()]
     outside = [w.accessibleName() or w.text() for w in parts if not w.isVisible() or not inside.contains(
         QRect(w.mapTo(window, w.rect().topLeft()), w.size()))]
     needs = window.minimumSizeHint().width()
@@ -1524,6 +1830,9 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     gate.clear()
     window.start_scan()
     check(pump(window.scanning, 5), "scan 2 running")
+    check(window.pulse.running and window.pulse.timer.isActive() and window.pulse.colour == window.theme.accent,
+          "the heart monitor sweeps during a checkup")
+    check(not window.grab().isNull() and window.paint_errors == [], "the sweeping monitor paints without errors")
     first_worker = window.worker
     window.start_scan()
     check(window.worker is first_worker and len(window.workers) == 1, "refresh during a scan is ignored")

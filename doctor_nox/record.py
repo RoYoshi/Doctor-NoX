@@ -1,4 +1,4 @@
-"""The one file Doctor NoX keeps: the conditions found at your last checkup.
+"""What Doctor NoX remembers: the conditions found at your last checkup.
 
 It lets the next checkup say what got better or worse. It holds a time and one
 condition per test ID, nothing else: no evidence, no names, no addresses. It
@@ -32,6 +32,17 @@ def snapshot(report: dict) -> dict:
     """What is remembered of a checkup."""
     return {"version": VERSION, "generated_at": report["generated_at"],
             "findings": {f["id"]: f["severity"] for f in report["findings"]}}
+
+
+def forget(path) -> bool:
+    """Delete the remembered checkup. True when there is none left."""
+    if path is None:
+        return True
+    try:
+        Path(path).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def load(path) -> dict | None:

@@ -105,7 +105,7 @@ def duration_text(ms):
 
 def empty_state(report, scanning, category, query, severities, symptom=clinic.GENERAL):
     if scanning and not report:
-        return "Examining… I'll have the findings when every test has finished."
+        return "Examining… findings appear when every test has finished."
     if not report:
         return "No checkup yet.\nPress Start checkup (F5). I only look: nothing on this PC is changed."
     if not visible(report, category, query, severities, symptom):
@@ -196,20 +196,21 @@ def _said(sentences, theme):
             + "".join(f'<p style="color:{theme.text};margin-top:0;margin-bottom:4px">{_e(line)}</p>' for line in rest))
 
 
-def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None, symptom=clinic.GENERAL, now=None):
+def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None, symptom=clinic.GENERAL, now=None,
+                  skipped_areas=()):
     """The diagnosis pane: what the doctor says, the follow-up, then the areas.
 
     follow is clinic.follow_up()'s result (None: no earlier checkup to compare with).
+    skipped_areas are the area keys your settings leave out of a checkup.
     """
     t = theme
     if not report:
-        lead = ("Examining… I'll have the findings when every test has finished." if scanning
-                else "Press <b>Start checkup</b> (F5).")
+        lead = ("Examining… findings appear when every test has finished." if scanning
+                else "Press <b>Start checkup</b> (F5), or tell me what's wrong.")
         return (f'<h2 style="color:{t.text};font-weight:600">{_e(clinic.MOTTO)}</h2>'
-                f'<p style="color:{t.muted}">I examine updates and packages, security, services, drivers, '
-                f'controllers, storage, apps, network and logs on any Linux. I only look and prescribe: I need no '
-                f'root, change nothing on your system and send nothing anywhere. To follow up next time, I keep '
-                f'one small note of my own: the conditions found at your last checkup.</p>'
+                f'<p style="color:{t.muted}">I examine updates, security, drivers, storage, apps, the network '
+                f'and logs on any Linux, then give you the diagnosis and the treatment. I only look: no root, '
+                f'no changes to your system, nothing sent anywhere.</p>'
                 f'<p style="color:{t.text}">{lead}</p>' + _legend(t))
     tot = report["totals"]
     state = report["overall"]
@@ -237,6 +238,11 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None
                         f'<tr><td style="color:{t.text};padding:2px 16px 2px 0">{_e(item["title"])}</td>'
                         f'<td style="color:{t.muted};padding:2px 0">only on {_e(item["applies_to"])}</td></tr>'
                         for item in skipped) + "</table>")
+    left_out = [CATEGORY_TITLE[key] for key in skipped_areas if key in CATEGORY_TITLE]
+    if left_out:
+        not_here = (_section("Left out by your settings", t)
+                    + f'<p style="color:{t.muted};margin-top:0">{_e(", ".join(left_out))}. '
+                      f'Turn them back on under Menu → Settings.</p>') + not_here
     return (_section("Diagnosis", t).replace("margin-top:16px", "margin-top:0")
             + f'<h2 style="color:{t.status[state].fg};margin-top:0;font-weight:600">{_e(HEADLINE[state])}</h2>'
             + _said(clinic.verdict(report, symptom), t)

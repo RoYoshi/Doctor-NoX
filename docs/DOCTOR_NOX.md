@@ -4,8 +4,9 @@
 diagnoses and prescribes, and never operates. It is **read-only** towards the system. It
 never changes packages, deployments, services, drivers or settings, never needs
 root and never makes network requests. It writes only a report you explicitly
-save and, to follow up, one file of its own with the conditions found at your
-last checkup ([Follow-ups](#follow-ups-the-one-file-doctor-nox-keeps)).
+save and two small files of its own: the conditions found at your last checkup
+([Follow-ups](#follow-ups-the-last-checkup)) and your
+[settings](#settings).
 
 ## Launch
 
@@ -81,16 +82,29 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   - **In good health**: otherwise.
 
   The time and duration of the last checkup sit under the pill.
-- **What's wrong?** Tell the doctor the complaint: *It's slow or freezes*, *No
-  sound*, *No internet*, *Updates won't install*, *Graphics or games act up*,
-  *Something crashes or won't start*, or *Just a checkup*.
+- **Heart monitor:** between the name and the pill, an ECG trace in the overall
+  condition's colour. While a checkup runs, a bright head sweeps along it as on
+  a bedside monitor. It is decoration: the condition is always written beside
+  it, and the sweep can be turned off in Settings.
+- **What's wrong?** Tell the doctor the complaint, in your own words or from
+  the list.
+  - **Type it** ("no sound", "my wifi keeps dropping", "games stutter") and
+    press Enter. Doctor NoX matches your words against the complaints it knows,
+    on this PC; nothing is sent anywhere. With no match it shows the whole
+    checkup and suggests sharing the doctor's note where you ask for help.
+  - **Or pick one:** *It's slow or freezes*, *No sound*, *No internet*,
+    *Updates won't install*, *Graphics or games act up*, *A controller isn't
+    working*, *It runs hot or loud*, *Running out of space*, *An app won't
+    install or open*, *Is my PC secure?*, *Something crashes or won't start*,
+    or *Just a checkup*.
   - The findings list then shows the tests that bear on the complaint, and the
     verdict speaks to it: what those tests found, and what needs a look
     elsewhere.
   - Every checkup still runs every test; the complaint only chooses what is
     shown. *Just a checkup* shows them all.
   - When the tests for a complaint all come back fine, the verdict says the
-    cause is somewhere Doctor NoX can't see, rather than that nothing is wrong.
+    cause is somewhere Doctor NoX can't see, rather than that nothing is wrong,
+    and suggests sharing the doctor's note.
 - **Start checkup / Cancel:** a checkup runs on a worker thread, so the window
   never blocks. The primary button reads **New checkup** after the first one.
   - Starting one while another is running is ignored.
@@ -105,9 +119,11 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   - redacted report for sharing (.txt / .json);
   - full local report (.json / .txt), saved with mode 0600;
   - copy the full report to the clipboard.
-- **View:** **Appearance** (Match system / Light / Dark) and **About**.
-- **Vital signs:** four readings from the last checkup, each edged in its
-  condition's colour. A click opens the test behind a reading.
+- **Menu:** **Settings…**, **Appearance** (Match system / Light / Dark) and
+  **About**.
+- **Vital signs:** four readings from the last checkup, in the fixed-width
+  font of a monitor, each edged in its condition's colour. A click opens the
+  test behind a reading.
 
   | Vital sign | Shows | From |
   |---|---|---|
@@ -116,7 +132,7 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   | Disk space | the filesystem that is worst off | `storage.space` |
   | Restart | whether a restart is waiting | `updates.reboot`, or `system.image.pending` on image-based systems |
 
-  A sign no test measured on this system reads **Not examined**; one that
+  A sign no test in the checkup measured reads **Not examined**; one that
   couldn't be read reads **Couldn't read**.
 - **Find and conditions:** free text across title, finding, what was found and
   treatment.
@@ -152,17 +168,19 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   - every area's worst condition, the tests that don't apply here, and what
     the conditions mean.
 - **Status bar:** progress and results messages on the left. The right side
-  always shows "Examines only: needs no root, makes no network requests,
-  uploads nothing, changes nothing".
+  always shows "Examines only · no root · no network requests · nothing
+  uploaded or changed".
 - **Keyboard:**
 
   | Key | Action |
   |---|---|
+  | Ctrl+L | type what's wrong |
   | Ctrl+F | find in the findings |
   | F5 or Ctrl+R | start a checkup |
   | Esc | cancel, or clear the search |
   | Ctrl+Shift+C | copy the doctor's note |
   | Ctrl+S | save redacted report |
+  | Ctrl+, | settings |
   | F1 | about |
   | Ctrl+Q | quit |
 
@@ -171,7 +189,26 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   The vital signs are a pointer shortcut; the tests behind them are in the
   findings list.
 
-### Follow-ups: the one file Doctor NoX keeps
+### Settings
+
+**Menu → Settings…** (Ctrl+,). Nothing changes until OK, and **Restore
+Defaults** puts everything back.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Appearance | Match system | Match system follows the desktop's light or dark setting and switches when it does; Light and Dark keep one theme |
+| Animate the heart monitor | on | whether the trace sweeps during a checkup |
+| Start a checkup when Doctor NoX opens | on | off: the window opens and waits for **Start checkup** |
+| Remember my last checkup | on | follow-ups; turning it off deletes the remembered checkup |
+| Stop a checkup after | 60 seconds | 5 to 300, the same limits as `--deadline` |
+| Areas to examine | all | an area you turn off is left out of every checkup; the diagnosis lists what was left out |
+
+They are kept in `$XDG_CONFIG_HOME/doctor-nox/settings.json`
+(`~/.config/doctor-nox/settings.json` unless you set it otherwise), readable
+only by you. Only the window reads or writes them. A missing or damaged file is
+never an error: every value that can't be used falls back to its default.
+
+### Follow-ups: the last checkup
 
 To say what changed, the window remembers the last checkup that finished:
 
@@ -186,8 +223,10 @@ To say what changed, the window remembers the last checkup that finished:
 - **How it is used:** the next checkup is compared with it. A test that got
   more or less urgent is **Worse** or **Better**. One that couldn't be
   examined this time is reported as that, never as better.
-- Deleting the file is safe: the next checkup has nothing to compare with and
-  starts a new record.
+- **Turning it off:** Settings → *Remember my last checkup*. Off deletes the
+  file and nothing is remembered.
+- Deleting the file yourself is safe too: the next checkup has nothing to
+  compare with and starts a new record.
 
 ### Appearance
 
@@ -199,10 +238,11 @@ NoX is Latin for night, so the dark theme is the night shift in a clinic:
 deep night-blue surfaces, moonlight text, and status colours that glow softly
 like monitor lights. The light theme is first light: cool paper and indigo ink.
 
-- **Choosing:** by default Doctor follows the desktop's colour scheme (Qt's
-  colour-scheme hint, else the desktop palette) and switches live when it
-  changes. Choose a theme for the session under **View → Appearance**, or set
-  `DOCTOR_NOX_THEME=light|dark|system`. Doctor writes no settings file.
+- **Choosing:** by default Doctor NoX follows the desktop's colour scheme
+  (Qt's colour-scheme hint, else the desktop palette) and switches live when it
+  changes. Choose a theme under **Menu → Settings** or **Menu → Appearance**;
+  the choice is remembered. `DOCTOR_NOX_THEME=light|dark|system`, when set,
+  decides instead.
 - **Accent:** moonlit lavender (`#b5a8ff`) in the dark theme and indigo
   (`#4a3cb5`) in the light one, used **only** for interaction: the primary
   button, focus, selection and progress. No status colour is close to it.
@@ -422,10 +462,10 @@ settings and says so.
   bootc or rpm-ostree transactions, no module loads, no `systemctl
   start/stop/enable/mask/daemon-reload/reset-failed`, no reboot, no chmod,
   no cleanup.
-- **Two things are ever written,** both in your own files and both atomically:
-  a report where you choose to save it (`report.py`), and the window's record
-  of the last checkup (`record.py`). A test checks that no other module
-  writes.
+- **Three things are ever written,** all in your own files and all atomically:
+  a report where you choose to save it (`report.py`), the window's record of
+  the last checkup (`record.py`) and your settings (`settings.py`). A test
+  checks that no other module writes.
 - **Command allowlist with argument patterns.** `doctor_nox/runner.py`
   declares every executable *and* every permitted argument list. Unit names,
   rpm packages, kernel modules and modinfo fields come from fixed sets.
@@ -518,7 +558,8 @@ doctor_nox/
   viewmodel.py  Qt-free filtering, grouping, badges, detail HTML (unit-tested)
   clinic.py     Qt-free doctor's side: verdict, vital signs, complaints,
                 follow-ups, the doctor's note (unit-tested)
-  record.py     the one file the window keeps: the last checkup's conditions
+  record.py     the last checkup's conditions, for follow-ups
+  settings.py   your settings for the window (unit-tested)
   theme.py      Qt-free light/dark palettes, status colours, WCAG contrast helper
   gui.py        PySide6 Qt Widgets window, stylesheet, status-pill delegates,
                 worker thread, self-test, synthetic-data screenshots
@@ -636,9 +677,12 @@ What the tests cover:
   are read from the real probes' results, so a reworded probe fails a test.
 - **GUI self-test:** uses synthetic probes to load, filter, select, export,
   rescan, ignore a rapid refresh, cancel, and close while scanning.
-  - It checks the doctor's wording, the verdict, the vital signs, a complaint,
-    a follow-up against a remembered checkup in a temporary directory, and
-    that every control fits in the window.
+  - It checks the doctor's wording, the verdict, the vital signs, a complaint
+    (picked and typed), the heart monitor at rest and sweeping, and a
+    follow-up against a remembered checkup in a temporary directory.
+  - It changes every setting, checks each takes effect and is saved, runs a
+    checkup with an area turned off, and restores the defaults.
+  - It checks that every control fits in the window.
   - It also switches to Light, Dark and Match system and renders the whole
     window in each.
   - It fails if a delegate raised a paint error or Qt could not parse a

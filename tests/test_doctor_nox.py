@@ -21,7 +21,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from doctor_testlib import ROOT, Tree  # noqa: E402
 
-from doctor_nox import cli, clinic, engine, model, probes, record, report, runner, theme, viewmodel as vm  # noqa: E402
+from doctor_nox import (cli, clinic, engine, model, probes, record, report, runner, settings, theme,  # noqa: E402
+                        viewmodel as vm)
 from doctor_nox.model import Finding  # noqa: E402
 from doctor_nox.probes import Probe  # noqa: E402
 
@@ -506,23 +507,23 @@ def checkup(*findings, complete=True, at=(2026, 11, 16, 18, 0)):
 class ClinicTests(unittest.TestCase):
     def test_the_verdict_says_the_most_important_thing_first(self):
         well = clinic.verdict(checkup(("storage.space", "pass"), ("hardware.audio", "info")))
-        self.assertEqual(well, ["Your PC is in good health. I ran 2 tests and nothing needs treatment."])
+        self.assertEqual(well, ["Your PC is in good health: 2 tests, nothing to treat."])
 
         ill = clinic.verdict(checkup(("storage.space", "error", "free some"), ("security.failed_units", "warn"),
                                      ("hardware.audio", "pass"), ("logs.boot", "unknown")))
         self.assertEqual(ill[0], "Your PC needs treatment.")
         self.assertEqual(ill[1], "1 thing needs treatment: Space.")
         self.assertIn("Keep an eye on Failed units.", ill)
-        self.assertIn("Start with Space; select it for the treatment.", ill)
-        self.assertTrue(any(line.startswith("I couldn't examine Boot.") and "clean bill of health" in line
-                            for line in ill))
+        self.assertIn("Start with Space.", ill)
+        self.assertIn("I couldn't examine Boot, so I can't call it healthy.", ill)
+        self.assertLessEqual(max(map(len, ill)), 60, "the verdict is short sentences")
         self.assertEqual(ill[-1], "The other 1 test came back fine.")
 
         watch = clinic.verdict(checkup(("hardware.sensors", "warn"), ("hardware.audio", "pass")))
-        self.assertEqual(watch[0], "Your PC is mostly well, but I would keep an eye on it.")
+        self.assertEqual(watch, ["Your PC is mostly well.", "Keep an eye on Sensors.", "The other 1 test came back fine."])
         self.assertFalse(any(line.startswith("Start with") for line in watch), "one finding needs no order")
         unseen = clinic.verdict(checkup(("logs.boot", "unknown")))
-        self.assertEqual(unseen[0], "I found nothing wrong, but I couldn't examine everything.")
+        self.assertEqual(unseen[0], "Nothing wrong that I could see, but I couldn't examine everything.")
         self.assertIn("stopped early", clinic.verdict(checkup(("logs.boot", "unknown"), complete=False))[-1])
         many = clinic.verdict(checkup(*[(f"storage.t{n}", "error") for n in range(5)]))
         self.assertEqual(many[1], "5 things need treatment: T0, T1 and 3 more.")
@@ -542,14 +543,15 @@ class ClinicTests(unittest.TestCase):
         self.assertTrue(clinic.related("anything.at_all", "no such complaint"), "an unknown complaint hides nothing")
 
         sound = clinic.verdict(rep, "sound")
-        self.assertEqual(sound[0], "For “No sound” I looked at 2 tests. They all came back fine, so the cause is "
-                                   "somewhere I can't see from here.")
-        self.assertEqual(sound[1], "Elsewhere, 2 other findings need a look: Space and Link.")
+        self.assertEqual(sound[0], "For “No sound” I looked at 2 tests. All fine, so the cause is somewhere I can't "
+                                   "see. Copy the doctor's note and share it where you ask for help.")
+        self.assertEqual(sound[1], "Elsewhere: Space and Link need a look.")
         net = clinic.verdict(rep, "network")
-        self.assertIn("Nothing is broken, but there is something to keep an eye on.", net[0])
+        self.assertIn("Nothing is broken, but one thing bears watching.", net[0])
         self.assertIn("Keep an eye on Link.", net)
+        self.assertEqual(net[-1], "Elsewhere: Space needs a look.")
         none = clinic.verdict(checkup(("storage.space", "pass")), "sound")
-        self.assertIn("no tests that apply to this system", none[0])
+        self.assertIn("I have no tests for “No sound” on this system.", none[0])
         self.assertIn("in good health", none[1])
         self.assertIn("No tests for “No sound” in this area",
                       vm.empty_state(rep, False, "storage", "", frozenset(model.SEVERITIES), "sound"))
@@ -615,7 +617,6 @@ class ClinicTests(unittest.TestCase):
         self.assertIn("Verdict:  Needs treatment (1 needs treatment, 1 to keep an eye on", note)
         self.assertIn("NEEDS TREATMENT\n- Updates & Packages / Package database", note)
         self.assertIn("KEEP AN EYE ON\n- Logs / Current boot errors", note)
-        self.assertNotIn("select it", note, "a note cannot be clicked")
         self.assertIn("nothing on this PC was changed", note.splitlines()[-1])
         self.assertIn("FULL LOCAL REPORT", clinic.note(rep))
         self.assertIn("1 test for other kinds of Linux did not apply here and was not run.",
@@ -623,6 +624,38 @@ class ClinicTests(unittest.TestCase):
         full = clinic.note(checkup(("storage.space", "error", "free some room"), ("logs.boot", "info")))
         self.assertIn("    Treatment: free some room", full)
         self.assertIn("NOTES\n- Logs / Boot", full)
+
+    def test_whats_wrong_can_be_typed_in_your_own_words(self):
+        for typed, meant in (("my wifi keeps dropping", "network"), ("No sound from the speakers!", "sound"),
+                             ("PC is really slow and laggy", "slow"), ("games stutter, low FPS", "graphics"),
+                             ("can't install apps", "apps"), ("the disk is full", "space"),
+                             ("is it safe? do I have a virus", "secure"), ("fan is so loud", "hot"),
+                             ("Xbox controller not detected", "controller"), ("updates fail", "updates"),
+                             ("it crashes on boot", "crash"), ("black screen", "graphics"),
+                             ("black screen on boot", "crash"),
+                             ("my printer is haunted", None), ("", None), ("???", None)):
+            self.assertEqual(clinic.guess(typed), meant, typed)
+        for symptom in clinic.SYMPTOMS[1:]:
+            self.assertTrue(symptom.words and symptom.tests, symptom.key)
+            self.assertEqual(clinic.guess(symptom.words[0]), symptom.key, "its own first word means it")
+            self.assertTrue(all(word == word.lower() for word in symptom.words), symptom.key)
+
+    def test_the_heart_monitor_trace_fits_its_strip(self):
+        for width, height in ((240, 36), (60, 34), (900, 40), (35, 34)):
+            points = clinic.pulse(width, height)
+            xs, ys = [x for x, _ in points], [y for _, y in points]
+            self.assertEqual((xs[0], xs[-1]), (0, width))
+            self.assertEqual(xs, sorted(xs), "the trace never turns back")
+            self.assertTrue(0 <= min(ys) and max(ys) <= height, (width, height, min(ys), max(ys)))
+            self.assertEqual(ys[0], ys[-1], "it starts and ends on the baseline")
+            self.assertLess(min(ys), height * 0.15, "the spike reaches near the top")
+        self.assertEqual(clinic.pulse(0, 36), [])
+        points = clinic.pulse(240, 36)
+        self.assertEqual(clinic.pulse_y(points, 0), points[0][1])
+        self.assertEqual(clinic.pulse_y(points, 9999), points[-1][1])
+        (x0, y0), (x1, y1) = points[5], points[6]
+        self.assertAlmostEqual(clinic.pulse_y(points, (x0 + x1) / 2), (y0 + y1) / 2)
+        self.assertEqual(clinic.pulse_y([], 5), 0.0)
 
     def test_conditions_are_worded_for_every_severity_and_json_keeps_its_own(self):
         for words in (theme.STATUS_TEXT, theme.STATUS_COUNT, theme.STATUS_MEANING, theme.HEADLINE, clinic.CONCERN):
@@ -671,11 +704,67 @@ class RecordTests(unittest.TestCase):
             self.assertNotRegex((PKG / module).read_text(), r"import.*\brecord\b|\brecord\.(save|load)", module)
         tree = ast.parse((PKG / "gui.py").read_text())
         funcs = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
-        self.assertIn("Window(record_path=record.default_path())", funcs["run"])
+        self.assertIn("Window(record_path=record.default_path(), settings_path=settings_store.default_path())",
+                      funcs["run"])
         for name in ("smoke_test", "screenshots", "self_test", "_self_test_steps", "_demo_report"):
             self.assertNotIn("default_path", funcs[name], name)
         writers = [p.name for p in PKG.rglob("*.py") if "os.replace(" in p.read_text()]
-        self.assertEqual(sorted(writers), ["record.py", "report.py"], "only reports you save and the record are written")
+        self.assertEqual(sorted(writers), ["record.py", "report.py", "settings.py"],
+                         "only reports you save, the record and your settings are written")
+        self.assertTrue(record.forget(None))
+
+
+class SettingsTests(unittest.TestCase):
+    def test_defaults_and_anything_unusable_falls_back(self):
+        defaults = settings.clean(None)
+        self.assertEqual(defaults, {"theme": "system", "checkup_at_launch": True, "remember": True,
+                                    "monitor_motion": True, "skip_areas": [], "deadline": 60})
+        self.assertIsNot(settings.clean(None)["skip_areas"], settings.DEFAULTS["skip_areas"])
+        for junk in ([], "x", 5, {"theme": "neon", "remember": "yes", "deadline": "soon", "skip_areas": "logs"},
+                     {"deadline": True}, {"skip_areas": list(settings.AREAS)}, {"unknown": 1}):
+            self.assertEqual(settings.clean(junk), defaults, junk)
+        mine = settings.clean({"theme": "dark", "checkup_at_launch": False, "remember": False,
+                               "monitor_motion": False, "skip_areas": ["logs", "nonsense", "hardware"],
+                               "deadline": 9000})
+        self.assertEqual(mine, {"theme": "dark", "checkup_at_launch": False, "remember": False,
+                                "monitor_motion": False, "skip_areas": ["hardware", "logs"], "deadline": 300})
+        self.assertEqual(settings.clean({"deadline": 1})["deadline"], 5)
+        self.assertEqual(settings.clean({"deadline": 42.9})["deadline"], 42)
+        self.assertEqual(set(settings.AREAS), set(model.CATEGORY_TITLE))
+
+    def test_saved_privately_and_read_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "doctor-nox" / settings.FILE_NAME
+            self.assertEqual(settings.load(path), settings.clean(None))
+            self.assertTrue(settings.save(path, {"theme": "light", "skip_areas": ["network"], "bogus": 1}))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual([p.name for p in path.parent.iterdir()], [settings.FILE_NAME])
+            self.assertEqual(json.loads(path.read_text()), dict(settings.clean(None), theme="light",
+                                                                skip_areas=["network"]))
+            self.assertEqual(settings.load(path)["theme"], "light")
+            for junk in ("", "{", "[1]", "x" * (settings.MAX_BYTES + 1)):
+                path.write_text(junk)
+                self.assertEqual(settings.load(path), settings.clean(None), junk[:20])
+            self.assertFalse(settings.save(None, {}))
+            self.assertFalse(settings.save(path / "under-a-file", {}))
+        self.assertEqual(settings.default_path({"XDG_CONFIG_HOME": "/c", "HOME": "/h"}),
+                         Path("/c/doctor-nox/settings.json"))
+        self.assertEqual(settings.default_path({"HOME": "/h"}), Path("/h/.config/doctor-nox/settings.json"))
+
+    def test_a_checkup_is_asked_only_for_what_differs_from_the_defaults(self):
+        self.assertEqual(settings.scan_options(settings.clean(None)), {})
+        options = settings.scan_options(settings.clean({"skip_areas": ["logs", "network"], "deadline": 20}))
+        self.assertEqual(options, {"selected": set(settings.AREAS) - {"logs", "network"}, "deadline": 20.0})
+        rep = fixture_report()
+        self.assertIn("Left out by your settings", vm.overview_html(rep, skipped_areas=["logs", "nope"]))
+        self.assertIn("Logs. Turn them back on", vm.overview_html(rep, skipped_areas=["logs", "nope"]))
+        self.assertNotIn("Left out by your settings", vm.overview_html(rep))
+        self.assertEqual({v["key"]: v for v in clinic.vitals(rep)}["disk"]["detail"],
+                         "No test in this checkup measured it.")
+
+    def test_only_the_window_uses_settings(self):
+        for module in ("cli.py", "engine.py", "report.py", "viewmodel.py", "clinic.py", "record.py"):
+            self.assertNotRegex((PKG / module).read_text(), r"\bsettings\b.*import|import.*\bsettings\b", module)
 
 
 # ── theme (light/dark palettes) ─────────────────────────────────────────────

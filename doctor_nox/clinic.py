@@ -9,8 +9,10 @@ The behaviour, all of it read from a finished report:
   verdict()    what a doctor would say first, in plain sentences
   vitals()     the four vital signs shown above the results
   SYMPTOMS     "What's wrong?": the tests that bear on a complaint
+  guess()      the complaint someone means when they type it in their own words
   follow_up()  what changed since the last checkup (see record.py)
   note()       the doctor's note that is copied for sharing
+  pulse()      the heart monitor's trace
 
 Doctor NoX diagnoses and prescribes. It never treats: nothing here changes
 the system, and no report field is rewritten (JSON keeps its severities).
@@ -29,7 +31,8 @@ from .theme import HEADLINE, STATUS_TEXT, status_count
 # How much care a condition asks for. INFO and PASS ask for none.
 CONCERN = {ERROR: 3, WARN: 2, UNKNOWN: 1, INFO: 0, PASS: 0}
 MOTTO = "Doctor NoX is in the house!"
-PRESCRIBE_ONLY = "I only examine and prescribe: nothing on this PC was changed and nothing was sent anywhere."
+PRESCRIBE_ONLY = "I only examine and prescribe: nothing on this PC was changed, nothing was sent anywhere."
+ASK_FOR_HELP = "Copy the doctor's note and share it where you ask for help."
 
 
 # ── "What's wrong?" ──────────────────────────────────────────────────────────
@@ -38,6 +41,7 @@ class Symptom:
     key: str
     label: str            # what the patient says
     tests: tuple = ()     # test IDs, or "area." prefixes, that bear on it; empty: every test
+    words: tuple = ()     # what people type when they mean it (lower case; see guess())
 
 
 GENERAL = "general"
@@ -45,17 +49,37 @@ SYMPTOMS = (
     Symptom(GENERAL, "Just a checkup"),
     Symptom("slow", "It's slow or freezes",
             ("hardware.cpu_memory", "hardware.sensors", "hardware.graphics", "storage.space",
-             "security.failed_units", "logs.boot")),
+             "security.failed_units", "logs.boot"),
+            ("slow", "lag", "freez", "frozen", "stutter", "hang", "unresponsive", "sluggish")),
     Symptom("sound", "No sound",
-            ("hardware.audio", "hardware.session", "security.failed_units", "logs.boot")),
-    Symptom("network", "No internet", ("network.", "security.firewall")),
+            ("hardware.audio", "hardware.session", "security.failed_units", "logs.boot"),
+            ("sound", "audio", "speaker", "headphone", "headset", "mic", "volume", "mute", "hear")),
+    Symptom("network", "No internet", ("network.", "security.firewall"),
+            ("internet", "wifi", "wi-fi", "network", "ethernet", "online", "offline", "connect", "dns", "router")),
     Symptom("updates", "Updates won't install",
-            ("updates.", "system.image", "storage.space", "network.route", "network.dns", "software.")),
+            ("updates.", "system.image", "storage.space", "network.route", "network.dns", "software."),
+            ("update", "upgrade", "patch", "outdated")),
     Symptom("graphics", "Graphics or games act up",
             ("hardware.graphics", "hardware.nvidia", "hardware.session", "hardware.controllers",
-             "hardware.sensors", "software.flatpak")),
+             "hardware.sensors", "software.flatpak"),
+            ("graphic", "game", "gaming", "fps", "screen", "display", "gpu", "nvidia", "amd", "flicker",
+             "resolution", "tearing", "steam")),
+    Symptom("controller", "A controller isn't working", ("hardware.controllers", "hardware.session", "logs.boot"),
+            ("controller", "gamepad", "joystick", "xbox", "dualsense", "dualshock", "joy-con")),
+    Symptom("hot", "It runs hot or loud",
+            ("hardware.sensors", "hardware.cpu_memory", "hardware.graphics", "hardware.nvidia"),
+            ("hot", "heat", "overheat", "fan", "loud", "noisy", "temperature", "thermal")),
+    Symptom("space", "Running out of space", ("storage.", "software."),
+            ("space", "full", "disk", "storage", "drive")),
+    Symptom("apps", "An app won't install or open",
+            ("software.", "storage.space", "network.route", "network.dns", "security.mac"),
+            ("app", "install", "flatpak", "snap", "program", "launch", "open")),
+    Symptom("secure", "Is my PC secure?",
+            ("security.", "updates.automatic", "updates.last_update", "updates.reboot"),
+            ("secure", "security", "safe", "virus", "malware", "hack", "firewall", "protect")),
     Symptom("crash", "Something crashes or won't start",
-            ("logs.boot", "security.failed_units", "security.mac", "storage.space", "hardware.cpu_memory")),
+            ("logs.boot", "security.failed_units", "security.mac", "storage.space", "hardware.cpu_memory"),
+            ("crash", "boot", "start", "error", "broken", "fail", "black screen", "restart")),
 )
 SYMPTOM = {s.key: s for s in SYMPTOMS}
 
@@ -67,6 +91,23 @@ def related(finding_id: str, symptom: str = GENERAL) -> bool:
         return True
     return any(finding_id.startswith(t) if t.endswith(".") else finding_id == t or finding_id.startswith(t + ".")
                for t in tests)
+
+
+def guess(text: str) -> str | None:
+    """The complaint someone means by what they typed ("my wifi keeps dropping"), or None.
+
+    A word counts when a word they typed starts with it ("freezes" for "freez"). The complaint
+    with the most such words wins; the one listed first on a tie. Nothing is sent anywhere.
+    """
+    typed = re.findall(r"[a-z0-9][a-z0-9'-]*", text.lower())
+    joined = " ".join(typed)
+    best, best_score = None, 0
+    for symptom in SYMPTOMS[1:]:
+        score = sum(1 for word in symptom.words
+                    if (word in joined if " " in word else any(t.startswith(word) for t in typed)))
+        if score > best_score:
+            best, best_score = symptom.key, score
+    return best
 
 
 # ── saying it ────────────────────────────────────────────────────────────────
@@ -82,7 +123,7 @@ def _by_concern(findings):
     return {sev: [f for f in findings if f["severity"] == sev] for sev in (ERROR, WARN, UNKNOWN)}
 
 
-def _care(findings, on_screen=True) -> list[str]:
+def _care(findings) -> list[str]:
     """One sentence for each condition that asks for care, most urgent first."""
     groups = _by_concern(findings)
     out = []
@@ -93,11 +134,9 @@ def _care(findings, on_screen=True) -> list[str]:
         out.append(f"Keep an eye on {_names(groups[WARN])}.")
     first = (groups[ERROR] or groups[WARN] or [None])[0]
     if first is not None and len(groups[ERROR]) + len(groups[WARN]) > 1:
-        out.append(f"Start with {first['title']}"
-                   + ("; select it for the treatment." if first["guidance"] and on_screen else "."))
+        out.append(f"Start with {first['title']}.")
     if groups[UNKNOWN]:
-        out.append(f"I couldn't examine {_names(groups[UNKNOWN])}. "
-                   "That isn't a clean bill of health, only something I couldn't see from here.")
+        out.append(f"I couldn't examine {_names(groups[UNKNOWN])}, so I can't call it healthy.")
     return out
 
 
@@ -110,48 +149,44 @@ def _tests(n: int) -> str:
     return f"{n} test" + ("" if n == 1 else "s")
 
 
-def verdict(report: dict, symptom: str = GENERAL, on_screen: bool = True) -> list[str]:
-    """What the doctor says first. Plain sentences, most important first.
-
-    on_screen=False is for text that leaves the window, where nothing can be selected.
-    """
+def verdict(report: dict, symptom: str = GENERAL) -> list[str]:
+    """What the doctor says first. Short plain sentences, most important first."""
     findings = report["findings"]
     out = []
     asked = SYMPTOM.get(symptom, SYMPTOMS[0])
     focus = [f for f in findings if related(f["id"], asked.key)] if asked.tests else []
     if asked.tests and not focus:
-        out.append(f"For “{asked.label}” I have no tests that apply to this system, so here is the whole checkup.")
+        out.append(f"I have no tests for “{asked.label}” on this system. Here is the whole checkup.")
     if focus:
         lead = f"For “{asked.label}” I looked at {_tests(len(focus))}."
         worst = _worst(focus)
         if worst == PASS:
-            out.append(f"{lead} They all came back fine, so the cause is somewhere I can't see from here.")
+            out.append(f"{lead} All fine, so the cause is somewhere I can't see. {ASK_FOR_HELP}")
         else:
-            out.append(lead + {ERROR: " I found something that needs treatment.",
-                               WARN: " Nothing is broken, but there is something to keep an eye on.",
-                               UNKNOWN: " I found nothing wrong, but I couldn't examine all of it."}[worst])
-            out += _care(focus, on_screen)
+            out.append(lead + {ERROR: " Something there needs treatment.",
+                               WARN: " Nothing is broken, but one thing bears watching.",
+                               UNKNOWN: " Nothing wrong that I could see, but I couldn't examine all of it."}[worst])
+            out += _care(focus)
         elsewhere = [f for f in findings if CONCERN[f["severity"]] and f not in focus]
         if elsewhere:
             n = len(elsewhere)
-            out.append(f"Elsewhere, {n} other {'finding needs' if n == 1 else 'findings need'} a look: "
-                       f"{_names(elsewhere)}.")
+            out.append(f"Elsewhere: {_names(elsewhere)} {'needs' if n == 1 else 'need'} a look.")
     else:
         worst = _worst(findings)
         if not findings:
             out.append("I had no tests to run on this system.")
         elif worst == PASS:
-            out.append(f"Your PC is in good health. I ran {_tests(len(findings))} and nothing needs treatment.")
+            out.append(f"Your PC is in good health: {_tests(len(findings))}, nothing to treat.")
         else:
             out.append({ERROR: "Your PC needs treatment.",
-                        WARN: "Your PC is mostly well, but I would keep an eye on it.",
-                        UNKNOWN: "I found nothing wrong, but I couldn't examine everything."}[worst])
-            out += _care(findings, on_screen)
+                        WARN: "Your PC is mostly well.",
+                        UNKNOWN: "Nothing wrong that I could see, but I couldn't examine everything."}[worst])
+            out += _care(findings)
             fine = sum(1 for f in findings if not CONCERN[f["severity"]])
             if fine:
                 out.append(f"The other {_tests(fine)} came back fine.")
     if not report["complete"]:
-        out.append("This checkup was stopped early, so some tests didn't finish.")
+        out.append("This checkup was stopped early: some tests didn't finish.")
     return out
 
 
@@ -217,7 +252,7 @@ def vitals(report: dict | None) -> list[dict]:
         finding = next((by_id[t] for t in tests if t in by_id), None)
         if finding is None:
             out.append(dict(key=key, label=label, value=NO_VALUE if not report else "Not examined", severity=None,
-                            finding_id="", detail="" if not report else "No test for this applies to this system."))
+                            finding_id="", detail="" if not report else "No test in this checkup measured it."))
             continue
         if finding["severity"] == UNKNOWN:
             value = "Couldn't read"
@@ -322,7 +357,7 @@ def note(report: dict, follow: dict | None = None, now: datetime.datetime | None
            f"Patient:  {patient}",
            f"Verdict:  {HEADLINE[report['overall']]} ({count_summary(report['totals'])})",
            ""]
-    out += verdict(report, on_screen=False) + follow_up_text(report, follow, now)
+    out += verdict(report) + follow_up_text(report, follow, now)
     for sev in (ERROR, WARN, UNKNOWN, INFO):
         items = [f for f in report["findings"] if f["severity"] == sev]
         if not items:
@@ -339,3 +374,37 @@ def note(report: dict, follow: dict | None = None, now: datetime.datetime | None
                     f"{'was' if len(skipped) == 1 else 'were'} not run."]
     out += ["", PRESCRIBE_ONLY]
     return "\n".join(out) + "\n"
+
+
+# ── the heart monitor ────────────────────────────────────────────────────────
+# One heartbeat as (x, y): x runs 0..1 along the beat, y is 0 on the baseline and 1 at the spike.
+BEAT = ((0.00, 0.0), (0.14, 0.0), (0.19, 0.12), (0.24, 0.0), (0.33, 0.0), (0.36, -0.14), (0.40, 1.0),
+        (0.44, -0.30), (0.48, 0.0), (0.60, 0.0), (0.69, 0.24), (0.78, 0.0), (1.00, 0.0))
+BEAT_WIDTH = 2.6  # one beat is this many times as wide as the trace is tall
+
+
+def pulse(width: float, height: float) -> list[tuple[float, float]]:
+    """The monitor's trace for a strip of this size: whole beats side by side, in pixels.
+
+    The baseline sits at 62% of the height, so the spike has room above it and the dips below.
+    """
+    if width <= 0 or height <= 0:
+        return []
+    beats = max(1, round(width / (height * BEAT_WIDTH)))
+    span = width / beats
+    base, up, down = height * 0.62, height * 0.54, height * 0.30
+    points = []
+    for beat in range(beats):
+        for x, y in BEAT if beat == 0 else BEAT[1:]:
+            points.append((round((beat + x) * span, 2), round(base - (y * up if y >= 0 else y * down), 2)))
+    return points
+
+
+def pulse_y(points, x: float) -> float:
+    """The trace's height at x, for the dot at the head of the sweep."""
+    if not points:
+        return 0.0
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x0 <= x <= x1:
+            return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return points[0][1] if x < points[0][0] else points[-1][1]
