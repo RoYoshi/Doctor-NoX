@@ -740,7 +740,7 @@ class Window(QMainWindow):
                                       "uploads nothing and changes nothing on your system")
         self.statusBar().addPermanentWidget(self.safety)
         self.statusBar().setSizeGripEnabled(False)
-        self.statusBar().showMessage("Ready when you are.")
+        self.statusBar().showMessage(clinic.MOTTO)
 
     # theme -------------------------------------------------------------------
     def set_theme_mode(self, mode: str):
@@ -1127,6 +1127,7 @@ class Window(QMainWindow):
                      "org.freedesktop.Flatpak permission, not inside the sandbox.</p>"
                      if flatpak.sandbox_app_path() else "")
         text = (f"<h3 style='margin-bottom:4px'>Doctor NoX {VERSION}</h3>"
+                f"<p style='margin-top:0;margin-bottom:4px'><i>{clinic.MOTTO}</i></p>"
                 f"<p style='color:{t.muted};margin-top:0'>NoX is Latin for night, and the name is a play on "
                 f"&ldquo;Doctor Noooo&rdquo;.</p>"
                 f"<p>A doctor for your Linux PC. It examines, diagnoses and prescribes, and never operates: "

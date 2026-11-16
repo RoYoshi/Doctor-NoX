@@ -28,6 +28,7 @@ from .theme import HEADLINE, STATUS_TEXT, status_count
 
 # How much care a condition asks for. INFO and PASS ask for none.
 CONCERN = {ERROR: 3, WARN: 2, UNKNOWN: 1, INFO: 0, PASS: 0}
+MOTTO = "Doctor NoX is in the house!"
 PRESCRIBE_ONLY = "I only examine and prescribe: nothing on this PC was changed and nothing was sent anywhere."
 
 

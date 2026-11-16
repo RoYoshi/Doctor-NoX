@@ -1,7 +1,7 @@
 # Doctor NoX · v1.0
 
-Doctor NoX is a doctor for your Linux PC: it examines, diagnoses and
-prescribes, and never operates. It is **read-only** towards the system. It
+*Doctor NoX is in the house!* It is a doctor for your Linux PC: it examines,
+diagnoses and prescribes, and never operates. It is **read-only** towards the system. It
 never changes packages, deployments, services, drivers or settings, never needs
 root and never makes network requests. It writes only a report you explicitly
 save and, to follow up, one file of its own with the conditions found at your

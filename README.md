@@ -5,6 +5,7 @@
 <h1 align="center">Doctor NoX</h1>
 
 <p align="center">
+  <em>Doctor NoX is in the house!</em><br>
   <strong>A doctor for your Linux PC.</strong><br>
   It examines updates, security, drivers, storage, the network and logs, tells you the diagnosis,<br>
   and prescribes the treatment. It never operates: it changes nothing on your system.

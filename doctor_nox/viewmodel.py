@@ -205,7 +205,7 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None
     if not report:
         lead = ("Examining… I'll have the findings when every test has finished." if scanning
                 else "Press <b>Start checkup</b> (F5).")
-        return (f'<h2 style="color:{t.text};font-weight:600">Time for a checkup</h2>'
+        return (f'<h2 style="color:{t.text};font-weight:600">{_e(clinic.MOTTO)}</h2>'
                 f'<p style="color:{t.muted}">I examine updates and packages, security, services, drivers, '
                 f'controllers, storage, apps, network and logs on any Linux. I only look and prescribe: I need no '
                 f'root, change nothing on your system and send nothing anywhere. To follow up next time, I keep '

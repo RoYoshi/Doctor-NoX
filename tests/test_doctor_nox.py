@@ -456,6 +456,7 @@ class ViewModelTests(unittest.TestCase):
         self.assertIn("only on systems with Snap", vm.overview_html(fixture_report(skipped=True)))
         self.assertNotIn("NOT APPLICABLE HERE", vm.overview_html(fixture_report()))
         self.assertIn("any Linux", vm.overview_html(None))
+        self.assertIn(clinic.MOTTO, vm.overview_html(None))
 
     def test_sidebar_badges_count_problems_and_mark_healthy_groups(self):
         zero = {sev: 0 for sev in model.SEVERITIES}
