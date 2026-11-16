@@ -14,8 +14,9 @@ import sys
 import tempfile
 import traceback
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
+from PySide6.QtCore import (QEvent, QPointF, QProcess, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer,
+                            QUrl, Signal, Slot)
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics,
                            QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
@@ -26,7 +27,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_ID, VERSION
-from . import clinic, engine, record, report as reports, settings as settings_store, theme as themes, viewmodel as vm
+from . import (clinic, engine, record, referral, report as reports, settings as settings_store, theme as themes,
+               viewmodel as vm)
 from .context import Context
 from .model import CATEGORIES, CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
 from .theme import STATUS_TEXT, Theme
@@ -556,9 +558,9 @@ class SettingsDialog(QDialog):
         heading("Checkups")
         self.at_launch = QCheckBox("Start a checkup when Doctor NoX opens")
         layout.addWidget(self.at_launch)
-        self.remember = QCheckBox("Remember my last checkup, to say what got better or worse")
+        self.remember = QCheckBox("Remember my checkups (the last 30), for follow-ups and a prognosis")
         layout.addWidget(self.remember)
-        hint("Turning this off deletes the remembered checkup.")
+        hint("Turning this off deletes them.")
         limit = QHBoxLayout()
         limit.addWidget(QLabel("Stop a checkup after"))
         self.deadline = QSpinBox()
@@ -652,9 +654,15 @@ class ScanThread(QThread):
 # ── window ───────────────────────────────────────────────────────────────────
 class Window(QMainWindow):
     def __init__(self, *, scan_func=engine.scan, context_factory=Context, autoscan=True, interactive=True,
-                 record_path=None, settings_path=None):
+                 record_path=None, settings_path=None, probe_ids=None, which=None, environ=None):
         super().__init__()
-        self.interactive = interactive        # False in self-tests: never open modal dialogs
+        self.interactive = interactive        # False in self-tests: no modal dialogs, nothing opened or copied
+        self._probe_ids = probe_ids           # the tests that can be run again alone (None: the real ones)
+        self._which, self._environ = which, environ  # for referrals; None: the real PATH and environment
+        self._partial = ""                    # the test being checked again, while that runs
+        self.rechecked: dict[str, str] = {}   # test ID: what its re-check found, for the details pane
+        self.last_copied = ""                 # what "Copy" last copied
+        self.last_opened: tuple = ()          # the referral or address last opened (kept in self-tests)
         # Your settings (None: the defaults, and nothing is written).
         self.settings_path = settings_path
         self.settings = settings_store.load(settings_path)
@@ -662,7 +670,7 @@ class Window(QMainWindow):
         self._starting_skipped: list[str] = []
         # Follow-ups: where the last checkup is remembered (None: nowhere, nothing is written).
         self.record_file = record_path
-        self.remembered = record.load(self.record_path)  # the checkup the next one is compared with
+        self.history = record.load(self.record_path)  # your chart, oldest first; the last one is compared with
         self.follow = None                    # clinic.follow_up() for the report on screen
         self.symptom = clinic.GENERAL         # "What's wrong?"
         self.workers: dict[int, ScanThread] = {}  # every thread not yet joined, by generation
@@ -931,6 +939,7 @@ class Window(QMainWindow):
         self.inner.addWidget(self.stack)
         self.details = QTextBrowser(objectName="details")
         self.details.setOpenLinks(False)
+        self.details.anchorClicked.connect(self._detail_link)
         self.details.setAccessibleName("Diagnosis and treatment")
         self.details.document().setDocumentMargin(16)
         self.inner.addWidget(self.details)
@@ -972,9 +981,9 @@ class Window(QMainWindow):
         saved = settings_store.save(self.settings_path, new)
         if was["remember"] and not new["remember"]:
             record.forget(self.record_file)
-            self.remembered = self.follow = None
+            self.history, self.follow = [], None
         elif new["remember"] and not was["remember"] and self.report and record.save(self.record_path, self.report):
-            self.remembered = record.snapshot(self.report)
+            self.history = record.load(self.record_path)
         if not self.theme_locked:
             self.theme_mode = new["theme"]
         self.apply_theme()  # renders everything again, the heart monitor included
@@ -1033,14 +1042,36 @@ class Window(QMainWindow):
         return self.busy
 
     def start_scan(self):
+        self._begin("")
+
+    def probe_ids(self):
+        if self._probe_ids is None:
+            from . import probes
+            self._probe_ids = [p.id for p in probes.load_all()]
+        return self._probe_ids
+
+    def recheck(self, finding_id: str) -> bool:
+        """Run one test again (after a treatment, say) and put its result into the checkup on screen."""
+        probe_id = clinic.probe_for(finding_id, self.probe_ids()) if self.report else None
+        if not probe_id or self.scanning() or self.close_requested:
+            return False
+        self._begin(probe_id)
+        return True
+
+    def _begin(self, only: str):
         if self.scanning() or self.close_requested:
             return  # rapid refreshes are ignored, never queued
         self.generation += 1
         self.busy = True
         self.last_error = ""
-        self._starting_skipped = list(self.settings["skip_areas"])
-        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self,
-                            options=settings_store.scan_options(self.settings))
+        self._partial = only
+        options = settings_store.scan_options(self.settings)
+        if only:
+            options["selected"] = {only}
+        else:
+            self._starting_skipped = list(self.settings["skip_areas"])
+            self.rechecked = {}
+        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self, options=options)
         queued = Qt.ConnectionType.QueuedConnection  # receiver: this window, in the GUI thread
         worker.progressed.connect(self._progress, queued)
         worker.completed.connect(self._completed, queued)
@@ -1052,7 +1083,8 @@ class Window(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
-        self.statusBar().showMessage("Examining… every test only looks; nothing is changed.")
+        self.statusBar().showMessage("Checking that one test again…" if only
+                                     else "Examining… every test only looks; nothing is changed.")
         self.worker.start()
         self.render_all()
 
@@ -1090,13 +1122,27 @@ class Window(QMainWindow):
             return
         if generation != self.generation:
             return  # a stale scan never overwrites a newer one
+        when = datetime.datetime.now().strftime("%H:%M")
+        if self._partial and self.report:
+            if not result["complete"]:
+                self.statusBar().showMessage("The re-check was stopped; the checkup is as it was.")
+            else:
+                self.report, changes = clinic.merge_recheck(self.report, result, self._partial)
+                said = clinic.recheck_text(changes)
+                for f in self.report["findings"]:
+                    if clinic.probe_for(f["id"], [self._partial]):
+                        self.rechecked[f["id"]] = f"Checked again at {when}."
+                        if self.follow:
+                            self.follow["changes"].pop(f["id"], None)  # that comparison is out of date now
+                self.statusBar().showMessage(said)
+            self.render_all()
+            return
         # A checkup that was stopped early has unfinished tests; comparing it would call them changes.
-        self.follow = clinic.follow_up(result, self.remembered) if result["complete"] else None
+        self.follow = clinic.follow_up(result, record.last(self.history)) if result["complete"] else None
         self.report = result
         self.report_skipped = self._starting_skipped
         if record.save(self.record_path, result):
-            self.remembered = record.snapshot(result)
-        when = datetime.datetime.now().strftime("%H:%M")
+            self.history = record.load(self.record_path)
         self.statusBar().showMessage(
             f"Checkup finished at {when}, took {vm.duration_text(result['duration_ms'])}"
             + ("" if result["complete"] else " · stopped early: cancelled or out of time"))
@@ -1251,8 +1297,10 @@ class Window(QMainWindow):
             if self.last_error:
                 self.details.setHtml(vm.error_html(self.last_error, self.theme))
             else:
-                self.details.setHtml(vm.overview_html(self.report, self.scanning(), self.theme, self.follow,
-                                                      self.symptom, skipped_areas=self.report_skipped))
+                self.details.setHtml(vm.overview_html(
+                    self.report, self.scanning(), self.theme, self.follow, self.symptom,
+                    skipped_areas=self.report_skipped, history=self.history,
+                    help_place=self._help_place() if self.report else None))
 
     def _toggle_severity(self, sev, on):
         (self.severities.add if on else self.severities.discard)(sev)
@@ -1322,7 +1370,87 @@ class Window(QMainWindow):
         if finding:
             self.selected_id = fid
             change = self.follow["changes"].get(fid) if self.follow else None
-            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono, change))
+            tool = self._tool(fid)
+            actions = {"recheck": bool(clinic.probe_for(fid, self.probe_ids())),
+                       "referral": tool["label"] if tool else None, "rechecked": self.rechecked.get(fid)}
+            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono, change, actions))
+
+    # the diagnosis pane's links ------------------------------------------------
+    def _detail_link(self, url):
+        link = url.toString()
+        if not link.startswith(vm.LINK):
+            return
+        action = link[len(vm.LINK):]
+        finding = next((f for f in (self.report or {}).get("findings", []) if f["id"] == self.selected_id), None)
+        if action == "help":
+            self.get_help()
+        elif action == "recheck" and finding:
+            self.recheck(finding["id"])
+        elif action == "open" and finding:
+            self.open_referral(finding["id"])
+        elif action.startswith("copy:") and finding:
+            known = clinic.commands(finding)
+            index = int(action[5:]) if action[5:].isdigit() else -1
+            if 0 <= index < len(known):
+                self._copy(known[index])
+                self.statusBar().showMessage(f"Copied: {known[index]}")
+
+    def _tool(self, finding_id: str):
+        """The desktop's own tool for a finding, when one is installed."""
+        injected = {"which": self._which} if self._which else {}
+        return referral.for_finding(finding_id, self._environ, **injected)
+
+    def _copy(self, text: str):
+        self.last_copied = text
+        if self.interactive:
+            QApplication.clipboard().setText(text)
+
+    def open_referral(self, finding_id: str) -> bool:
+        """Open the desktop's own tool for a finding. Doctor NoX only opens it; any change there is yours."""
+        tool = self._tool(finding_id)
+        if not tool:
+            return False
+        self.last_opened = tool["argv"]
+        if self.interactive and not QProcess.startDetached(tool["argv"][0], list(tool["argv"][1:])):
+            self.statusBar().showMessage(f"Couldn't open {tool['argv'][0]}.")
+            return False
+        self.statusBar().showMessage("Opened. Whatever you change there is yours to change; "
+                                     "then use Check this again.")
+        return True
+
+    def _os_release(self) -> dict:
+        from . import flatpak
+        try:
+            if flatpak.sandbox_app_path():  # Doctor's own Flatpak: the computer's os-release, not the runtime's
+                return referral.parse_os_release(Path("/run/host/os-release").read_text(errors="replace")[:65536])
+            return self._context_factory().os_release()
+        except OSError:
+            return {}
+
+    def _help_url(self) -> str:
+        if not hasattr(self, "_help_address"):
+            self._help_address = referral.help_url(self._os_release())
+        return self._help_address
+
+    def _help_place(self) -> str:
+        """Where Get help leads, as a host name; "" when only the note can be copied."""
+        return QUrl(self._help_url()).host() if self._help_url() else ""
+
+    def get_help(self):
+        """Copy the doctor's note and open where this distribution says to ask for help."""
+        if not self.report:
+            return
+        self._copy(self.note_text())
+        url = self._help_url()
+        if url:
+            self.last_opened = (url,)
+            if self.interactive:
+                QDesktopServices.openUrl(QUrl(url))
+            self.statusBar().showMessage(f"Doctor's note copied. Paste it at {QUrl(url).host()}, which is opening; "
+                                         "read it before you post it.")
+        else:
+            self.statusBar().showMessage("Doctor's note copied. Paste it where you ask for help; "
+                                         "read it before you post it.")
 
     # output ------------------------------------------------------------------
     def _identity(self):
@@ -1339,7 +1467,7 @@ class Window(QMainWindow):
     def copy_note(self):
         if not self.report:
             return
-        QApplication.clipboard().setText(self.note_text())
+        self._copy(self.note_text())
         self.statusBar().showMessage("Doctor's note copied. It is redacted for sharing; read it before you post it.")
 
     def export(self, redacted, fmt):
@@ -1398,7 +1526,7 @@ class Window(QMainWindow):
                 f"Ubuntu, Arch and openSUSE, with general tests everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. Reports are written only where "
                 f"you choose. It keeps two small files of its own: your settings and, unless you turn that off, "
-                f"the conditions found at your last checkup.</p>{sandboxed}"
+                f"a chart of your last 30 checkups.</p>{sandboxed}"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION}, {qt}, "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
@@ -1501,12 +1629,20 @@ def _demo_report():
                         finished=finished, complete=True, not_applicable=skipped)
 
 
-def _demo_previous(report):
-    """A made-up earlier checkup for the screenshots: free space was better then, the controller worse."""
-    earlier = datetime.datetime.fromisoformat(report["generated_at"]) - datetime.timedelta(days=4)
+def _demo_history(report):
+    """A made-up chart for the screenshots: eight earlier checkups over a month, with free space
+    falling, then the one on screen. Last time free space was better and the controller worse."""
+    now = datetime.datetime.fromisoformat(report["generated_at"])
     conditions = {f["id"]: f["severity"] for f in report["findings"]}
     conditions.update({"storage.space": "warn", "hardware.controllers": "error"})
-    return {"version": record.VERSION, "generated_at": earlier.isoformat(timespec="seconds"), "findings": conditions}
+    history = []
+    for n, (days, overall, free) in enumerate(((30, "pass", 221.0), (26, "pass", 214.5), (22, "warn", 209.9),
+                                               (18, "pass", 204.0), (14, "pass", 198.2), (10, "warn", 193.1),
+                                               (7, "warn", 188.0), (4, "error", 185.6))):
+        history.append({"generated_at": (now - datetime.timedelta(days=days)).isoformat(timespec="seconds"),
+                        "overall": overall, "findings": dict(conditions) if n == 7 else {},
+                        "metrics": {"disk": {"/": [free, 465.2]}, "temperature": 45 + n % 3}})
+    return history + [record.snapshot(report)]
 
 
 def screenshots(out_dir: str) -> int:
@@ -1533,7 +1669,9 @@ def screenshots(out_dir: str) -> int:
                                            ("details", QSize(1280, 800), demo, True),
                                            ("narrow", QSize(980, 760), demo, True)):
             window.report = report
-            window.follow = clinic.follow_up(report, _demo_previous(report)) if report else None
+            window._help_address = "https://www.debian.org/support"  # the demo is a Debian; nothing is read
+            window.history = _demo_history(report) if report else []
+            window.follow = clinic.follow_up(report, window.history[-2]) if report else None
             window.category = vm.OVERVIEW
             window.selected_id = ""
             window.resize(size)
@@ -1635,8 +1773,18 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
             time.sleep(0.02)
         return Finding("logs.boot", "logs", "Current boot errors", "unknown", "slow fixture")
 
+    space_runs = []
+
+    def space_probe(ctx):  # needs treatment the first time, healthy once it is checked again
+        space_runs.append(1)
+        if len(space_runs) == 1:
+            return Finding("storage.space", "storage", "Free space", "error", "Low free space: /",
+                           guidance=["Look at `journalctl --disk-usage`, and ask someone in `wheel`."])
+        return Finding("storage.space", "storage", "Free space", "pass", "Enough free space")
+
     probes = [Probe("fixture.fast", "system", "fixture", fixture_probe),
-              Probe("fixture.slow", "logs", "slow", slow_probe)]
+              Probe("fixture.slow", "logs", "slow", slow_probe),
+              Probe("storage.space", "storage", "Free space", space_probe)]
 
     def scan(ctx, progress=None, selected=None, deadline=30):
         return engine.scan(ctx, progress=progress, probes=probes, deadline=min(deadline, 30), selected=selected)
@@ -1664,13 +1812,15 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     records = tempfile.TemporaryDirectory(prefix="doctor-nox-selftest-record-")
     record_path = Path(records.name) / "state" / record.FILE_NAME
     record_path.parent.mkdir(parents=True)
-    record_path.write_text(json.dumps({
-        "version": record.VERSION, "generated_at": "2026-01-01T00:00:00+00:00",
-        "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}))
+    record_path.write_text(json.dumps({"version": record.VERSION, "checkups": [{
+        "generated_at": "2026-01-01T00:00:00+00:00", "overall": "error",
+        "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}]}))
 
     settings_path = Path(records.name) / "config" / settings_store.FILE_NAME
     window = Window(scan_func=scan, context_factory=fixture_context, autoscan=False, interactive=False,
-                    record_path=record_path, settings_path=settings_path)
+                    record_path=record_path, settings_path=settings_path,
+                    probe_ids=[probe.id for probe in probes], which=lambda name: f"/usr/bin/{name}",
+                    environ={"XDG_CURRENT_DESKTOP": "KDE"})
     window.show()
     app.processEvents()
     log("window shown")
@@ -1685,7 +1835,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     log("scan 1 started")
     check(pump(lambda: window.report is not None and not window.scanning()), "scan 1 completes")
     check(window.workers == {} and window.worker is None, "scan 1 thread joined and released")
-    check(window.tree.topLevelItemCount() == 6, "the diagnosis lists all 6 findings")
+    check(window.tree.topLevelItemCount() == 7, "the diagnosis lists all 7 findings")
     check(window.tree.topLevelItemCount() > 0 and window.tree.topLevelItem(0).data(0, SEV_ROLE) == "error",
           "most severe finding sorts first")
     check(bool(probe_threads) and all(n.startswith("doctor-probe") for n in probe_threads),
@@ -1702,8 +1852,34 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     check(not window.tree.isColumnHidden(CHANGE_COLUMN)
           and window.tree.topLevelItem(0).text(CHANGE_COLUMN) == "Worse", "the findings mark what got worse")
     saved = record.load(record_path)
-    check(saved is not None and saved["generated_at"] == window.report["generated_at"]
-          and oct(record_path.stat().st_mode & 0o777) == "0o600", "the finished checkup is remembered, privately")
+    check(len(saved) == 2 and saved[-1]["generated_at"] == window.report["generated_at"]
+          and oct(record_path.stat().st_mode & 0o777) == "0o600", "the finished checkup joins the chart, privately")
+    check("Your chart" in said and "2 checkups" in said and "Get help" in said,
+          "the diagnosis shows the chart and offers help")
+
+    # 1b'. treat, then check again: copy a command, open the desktop's tool, re-run one test
+    window.open_finding("storage.space")
+    app.processEvents()
+    shown = window.details.toPlainText()
+    check("journalctl --disk-usage" in shown and "Changes nothing." in shown and "Copy" in shown,
+          "a treatment's command is explained and can be copied")
+    check("See what is using the space" in shown and "Check this again" in shown,
+          "a finding offers the desktop's own tool and a re-check")
+    window._detail_link(QUrl(vm.LINK + "copy:0"))
+    window._detail_link(QUrl(vm.LINK + "open"))
+    check(window.last_copied == "journalctl --disk-usage" and window.last_opened == ("/usr/bin/filelight",),
+          "the links copy the command and name the tool (nothing is started in a self-test)")
+    window._detail_link(QUrl(vm.LINK + "recheck"))
+    check(pump(lambda: not window.scanning() and len(space_runs) == 2), "one test runs again on its own")
+    again = {f["id"]: f["severity"] for f in window.report["findings"]}
+    check(len(again) == 7 and again["storage.space"] == "pass" and window.report["totals"]["error"] == 1
+          and "Healthy now (was Needs treatment)" in window.statusBar().currentMessage(),
+          "the re-check replaces that test's result and says what changed")
+    check("Checked again at" in window.details.toPlainText() and "None needed." in window.details.toPlainText(),
+          "the details show the re-checked result")
+    window._detail_link(QUrl(vm.LINK + "help"))
+    check("doctor's note" in window.last_copied and "alice" not in window.last_copied,
+          "get help copies the redacted note")
     window.vital_tiles["temperature"].clicked.emit("hardware.sensors")
     app.processEvents()
     check("Temperatures" in window.details.toPlainText() and "None needed." in window.details.toPlainText(),
@@ -1714,7 +1890,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
           and "No internet" in window.symptom_btn.text(), "what's wrong narrows the findings and the verdict")
     window.set_symptom(clinic.GENERAL)
     app.processEvents()
-    check(window.tree.topLevelItemCount() == 6, "just a checkup shows every finding again")
+    check(window.tree.topLevelItemCount() == 7, "just a checkup shows every finding again")
     note = window.note_text()
     check("doctor's note" in note and "NEEDS TREATMENT" in note and "alice" not in note and "10.1.2.3" not in note,
           "the doctor's note is in the doctor's words and redacted")
@@ -1724,7 +1900,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
           "what's wrong can be typed in your own words")
     window.describe("my printer is haunted")
     app.processEvents()
-    check(window.symptom == clinic.GENERAL and window.tree.topLevelItemCount() == 6,
+    check(window.symptom == clinic.GENERAL and window.tree.topLevelItemCount() == 7,
           "a complaint with no tests shows the whole checkup")
     check(not window.pulse.running and not window.pulse.timer.isActive() and window.pulse.colour
           == window.theme.status["error"].fg, "the heart monitor rests in the condition's colour")
@@ -1748,7 +1924,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
           "turning off remembering deletes the remembered checkup")
     window.start_scan()
     check(pump(lambda: not window.scanning() and window.report is not None
-               and len(window.report["findings"]) == 5), "an area turned off is left out of the checkup")
+               and len(window.report["findings"]) == 6), "an area turned off is left out of the checkup")
     check("Left out by your settings" in window.details.toPlainText() and not record_path.exists(),
           "the diagnosis says what was left out, and nothing is remembered")
     dialog.restore_defaults()

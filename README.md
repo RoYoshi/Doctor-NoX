@@ -45,13 +45,13 @@ showing up as Unknown.
 
 | Group | Examples |
 |---|---|
-| System | distribution, family and kernel; a stale `/etc/os-release`; on OSTree systems the booted, staged, rollback and pinned deployments, the update source and layered packages |
+| System | distribution, family and kernel; how long startup took; a stale `/etc/os-release`; on OSTree systems the booted, staged, rollback and pinned deployments, the update source and layered packages |
 | Updates & Packages | a pending restart, broken or locked package databases, config files left by updates, when the system was last updated, automatic updates |
 | Security & Services | SELinux or AppArmor, the firewall (firewalld, ufw), failed services |
-| Hardware & Gaming | GPU driver (NVIDIA Open or proprietary, Nouveau/NVK, AMD, Intel), NVIDIA kernel/user-space mismatch, PipeWire or PulseAudio, Xbox-protocol controllers, temperatures |
+| Hardware & Gaming | GPU driver (NVIDIA Open or proprietary, Nouveau/NVK, AMD, Intel), NVIDIA kernel/user-space mismatch, PipeWire or PulseAudio, Xbox-protocol controllers, temperatures, battery wear, Bluetooth, microphone and camera |
 | Storage | read-only filesystems (what is normal depends on the kind of system), where your home lives, free space including `/boot` |
 | Apps | Flatpak remotes and apps, Snap, whether installed apps can appear in your menu |
-| Network | links, routes, DNS, NetworkManager (local state only, no packets sent) |
+| Network | links, routes, DNS, NetworkManager, Wi-Fi signal strength (local state only, no packets sent) |
 | Logs | critical and error entries in this boot's journal |
 
 `doctor-nox --list-checks` lists every check and which apply to your system.
@@ -86,9 +86,15 @@ a checkup and talks you through it like a doctor:
   condition's colour that sweeps during a checkup, and temperature, memory,
   disk space, and whether a restart is waiting.
 - **Each finding** has a diagnosis, what was found, and a treatment. Doctor
-  NoX never carries a treatment out itself.
-- **Follow-ups:** it remembers the last checkup on this PC and says what got
-  better or worse since.
+  NoX never carries a treatment out itself, but it gets you there: commands
+  have a Copy link and a line on what they do, a finding can open your
+  desktop's own settings or tool for it, and **Check this again** re-runs one
+  test to confirm the fix: "Free space: Healthy now".
+- **Follow-ups and a prognosis:** it keeps a chart of your last 30 checkups,
+  says what got better or worse, and warns where things are heading: "/ has
+  lost 20 GiB in about 2 weeks. At this rate it is full in about 4 months."
+- **Get help:** when it can't find the cause, it copies the redacted note and
+  opens your distribution's own support page.
 
 **Settings** (Menu → Settings, Ctrl+,) are yours: light, dark or follow the
 desktop; whether a checkup starts when it opens; whether it remembers
@@ -127,10 +133,11 @@ only where you choose, readable only by you (mode 0600).
 - **Read-only.** No sudo or Polkit, no package installs or removals, no
   bootc or rpm-ostree changes, no `systemctl start/stop/enable`, no reboots.
   It writes three things only, all in your own files: a report you save, the
-  window's record of your last checkup
-  (`~/.local/state/doctor-nox/last-checkup.json`: a time and one condition per
-  test, nothing else; you can turn it off), and your settings
-  (`~/.config/doctor-nox/settings.json`).
+  window's chart of your last 30 checkups
+  (`~/.local/state/doctor-nox/checkups.json`: times, conditions, free space
+  and temperature, nothing else; you can turn it off), and your settings
+  (`~/.config/doctor-nox/settings.json`). The only programs it starts besides
+  its read-only checks are desktop tools from a fixed list, when you click.
 - **Allowlisted commands.** Every program Doctor may run, and every argument
   list it may use, is declared in [`doctor_nox/runner.py`](doctor_nox/runner.py):
   queries such as `rpm -q`, `dpkg --audit`, `pacman -Qdtq`, `rpm-ostree status`

@@ -23,7 +23,7 @@ DEADLINE_RANGE = (5, 300)  # seconds, the same limits as --deadline
 DEFAULTS = {
     "theme": SYSTEM,             # system | light | dark
     "checkup_at_launch": True,   # examine as soon as the window opens
-    "remember": True,            # keep the last checkup for follow-ups (record.py)
+    "remember": True,            # keep a chart of checkups for follow-ups (record.py)
     "monitor_motion": True,      # the heart monitor sweeps during a checkup
     "skip_areas": [],            # areas left out of a checkup
     "deadline": 60,              # seconds before a checkup is stopped

@@ -5,7 +5,7 @@ diagnoses and prescribes, and never operates. It is **read-only** towards the sy
 never changes packages, deployments, services, drivers or settings, never needs
 root and never makes network requests. It writes only a report you explicitly
 save and two small files of its own: the conditions found at your last checkup
-([Follow-ups](#follow-ups-the-last-checkup)) and your
+([Follow-ups](#follow-ups-your-chart)) and your
 [settings](#settings).
 
 ## Launch
@@ -46,13 +46,13 @@ system it is for, and the window shows these under **Not applicable here**.
 
 | Scope | Checks |
 |---|---|
-| every Linux | identity, os-release, MAC, hardware, storage, network |
+| every Linux | identity, os-release, MAC, hardware (battery, Bluetooth, microphone and camera included), storage, network (Wi-Fi signal included) |
 | package-based and transactional-update systems | pending restart |
 | package-based Fedora, Debian, Arch and openSUSE | package database, last update |
 | Fedora, Debian, Arch and openSUSE families | config files to review |
 | those families and OSTree systems, not SteamOS | automatic updates |
 | image-based OSTree systems | image deployments |
-| systemd | firewall, failed services, boot journal |
+| systemd | firewall, failed services, boot journal, startup time |
 | Flatpak or Snap installed | Flatpak, Snap |
 
 ## The window
@@ -94,9 +94,10 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
     checkup and suggests sharing the doctor's note where you ask for help.
   - **Or pick one:** *It's slow or freezes*, *No sound*, *No internet*,
     *Updates won't install*, *Graphics or games act up*, *A controller isn't
-    working*, *It runs hot or loud*, *Running out of space*, *An app won't
-    install or open*, *Is my PC secure?*, *Something crashes or won't start*,
-    or *Just a checkup*.
+    working*, *The camera or microphone isn't working*, *Bluetooth isn't
+    working*, *The battery drains fast*, *It runs hot or loud*, *Running out
+    of space*, *An app won't install or open*, *Is my PC secure?*, *Something
+    crashes or won't start*, or *Just a checkup*.
   - The findings list then shows the tests that bear on the complaint, and the
     verdict speaks to it: what those tests found, and what needs a look
     elsewhere.
@@ -199,7 +200,7 @@ Defaults** puts everything back.
 | Appearance | Match system | Match system follows the desktop's light or dark setting and switches when it does; Light and Dark keep one theme |
 | Animate the heart monitor | on | whether the trace sweeps during a checkup |
 | Start a checkup when Doctor NoX opens | on | off: the window opens and waits for **Start checkup** |
-| Remember my last checkup | on | follow-ups; turning it off deletes the remembered checkup |
+| Remember my checkups | on | follow-ups, the prognosis and the chart; turning it off deletes them |
 | Stop a checkup after | 60 seconds | 5 to 300, the same limits as `--deadline` |
 | Areas to examine | all | an area you turn off is left out of every checkup; the diagnosis lists what was left out |
 
@@ -208,25 +209,62 @@ They are kept in `$XDG_CONFIG_HOME/doctor-nox/settings.json`
 only by you. Only the window reads or writes them. A missing or damaged file is
 never an error: every value that can't be used falls back to its default.
 
-### Follow-ups: the last checkup
+### Follow-ups: your chart
 
-To say what changed, the window remembers the last checkup that finished:
+The window keeps a chart: the last 30 checkups that finished.
 
-- **Where:** `$XDG_STATE_HOME/doctor-nox/last-checkup.json`, which is
-  `~/.local/state/doctor-nox/last-checkup.json` unless you set it otherwise.
-  The file is readable only by you (mode 0600).
-- **What:** the time of the checkup and one condition per test ID. No
-  evidence, names, addresses or log lines.
+- **Where:** `$XDG_STATE_HOME/doctor-nox/checkups.json`, which is
+  `~/.local/state/doctor-nox/checkups.json` unless you set it otherwise. The
+  file is readable only by you (mode 0600).
+- **What:** for each checkup, its time, the overall condition, one condition
+  per test ID, and two kinds of figures: free space per filesystem and the
+  hottest temperature. No evidence, names, addresses or log lines.
 - **When:** only the window writes it, after a checkup that finished. A
-  checkup that was stopped early is neither remembered nor compared. The
-  command line, the self-tests and screenshot mode never write it.
-- **How it is used:** the next checkup is compared with it. A test that got
-  more or less urgent is **Worse** or **Better**. One that couldn't be
-  examined this time is reported as that, never as better.
-- **Turning it off:** Settings → *Remember my last checkup*. Off deletes the
-  file and nothing is remembered.
-- Deleting the file yourself is safe too: the next checkup has nothing to
-  compare with and starts a new record.
+  checkup that was stopped early is neither kept nor compared. The command
+  line, the self-tests and screenshot mode never write it.
+- **Since your last checkup:** a test that got more or less urgent is
+  **Worse** or **Better**. One that couldn't be examined this time is reported
+  as that, never as better.
+- **Prognosis:** said only when the chart supports it.
+  - Free space: at least three checkups over at least three days, a fall of
+    at least 1 GiB (or 1% of the filesystem), and a rate that fills it within
+    half a year. "/ has lost 20 GiB in about 2 weeks. At this rate it is full
+    in about 4 months."
+  - Temperature: 12 °C or more above the average of the last checkups.
+- **Your chart:** one mark per checkup, coloured by its overall condition,
+  with the same said in words.
+- **Turning it off:** Settings → *Remember my checkups*. Off deletes the file
+  and nothing is kept.
+- Deleting the file yourself is safe too: the next checkup starts a new chart.
+
+### Treat, then check again
+
+Doctor NoX never carries a treatment out, but it helps you do it and then
+confirms it worked:
+
+- **Commands in a treatment** get their own line with a **Copy** link and one
+  plain sentence on what the command does, ending in "Changes nothing." or
+  "This changes your system: read it first." Only commands Doctor NoX knows
+  are treated this way (`clinic.COMMANDS`); a test checks that every command a
+  treatment can show is known.
+- **Check this again** runs that one test again and puts its result into the
+  checkup on screen: "Free space: Healthy now (was Needs treatment)." The rest
+  of the checkup, its time and the chart stay as they were.
+- **Referrals:** a finding can offer your desktop's own tool, such as sound,
+  network, Bluetooth, display or firewall settings, the disk usage viewer, the
+  system monitor, the software center or the log viewer.
+  - The tools are a fixed list in `doctor_nox/referral.py`: KDE Plasma's and
+    GNOME's own, plus a few that suit any desktop. Nothing in the command line
+    comes from a report or from you.
+  - A tool is offered only when it is installed in a system directory, and
+    started only when you click. Doctor NoX opens it and does nothing else
+    with it.
+  - Not offered in the Flatpak, where those tools are outside the sandbox.
+- **Get help** copies the redacted doctor's note and opens the address your
+  distribution gives for support in its `os-release` (`SUPPORT_URL`, else
+  `BUG_REPORT_URL`, else `HOME_URL`; `https://` only). Your browser opens it;
+  Doctor NoX itself still makes no network request. Without such an address
+  it only copies the note.
 
 ### Appearance
 
@@ -328,6 +366,11 @@ There is deliberately no percentage "health score".
 | `hardware.audio` | all | `/proc/asound/cards`, PipeWire and PulseAudio sockets | Cards but no sound server → WARN. No cards → INFO. |
 | `hardware.controllers` | all | `/proc/bus/input/devices`, `/sys/bus/usb/devices`, `modules.dep`; on Fedora `rpm -q kernel-modules-extra-$(uname -r)` | See [controllers](#controllers). |
 | `hardware.sensors` | all | `/sys/class/hwmon` | WARN only at or above a sensor's own `crit` value. |
+| `hardware.battery` | all | `/sys/class/power_supply` | How much of its capacity when new the battery still holds: 80% or more → PASS, 60–79% → INFO, below 60% → WARN. No battery → INFO. A mouse's or controller's own battery is ignored. |
+| `hardware.bluetooth` | all | `/sys/class/bluetooth`, `/sys/class/rfkill` | Off by a hardware switch or the firmware → WARN. Turned off → INFO. No adapter → INFO. |
+| `hardware.capture` | all | `/proc/asound/pcm`, `/sys/class/video4linux` | Which microphone inputs and cameras the kernel sees; none → INFO. Nothing is recorded. |
+| `network.wifi` | all | `/proc/net/wireless` | Signal in dBm: −70 or better → PASS, to −80 → INFO, weaker → WARN. Wi-Fi network names are never read. |
+| `system.startup` | systemd | `systemd-analyze time` | How long the last start took: under 90 s → PASS, longer → INFO with what to look at. Not readable (a container, or still starting) → UNKNOWN. |
 | `storage.layout` / `storage.home` | all | `/proc/self/mountinfo` | See [storage](#storage). |
 | `storage.space` | all | `statvfs` | See [storage](#storage). |
 | `software.flatpak` | Flatpak installed | `flatpak remotes`, `flatpak list` (system + user), `XDG_DATA_DIRS` | Apps and remotes → PASS; no remotes and no apps → INFO; installed apps whose folder is missing from `XDG_DATA_DIRS` in a desktop session → WARN (they may not appear in menus). |
@@ -464,8 +507,13 @@ settings and says so.
   no cleanup.
 - **Three things are ever written,** all in your own files and all atomically:
   a report where you choose to save it (`report.py`), the window's record of
-  the last checkup (`record.py`) and your settings (`settings.py`). A test
-  checks that no other module writes.
+  your chart of checkups (`record.py`) and your settings (`settings.py`). A
+  test checks that no other module writes.
+- **One more place starts a program,** and only at your click: the window
+  opens a desktop tool from the fixed list in `referral.py`, or hands your
+  distribution's support address to the browser. Tests pin the list, that
+  nothing in it is a shell or a terminal, and that neither happens in a
+  self-test.
 - **Command allowlist with argument patterns.** `doctor_nox/runner.py`
   declares every executable *and* every permitted argument list. Unit names,
   rpm packages, kernel modules and modinfo fields come from fixed sets.
@@ -558,7 +606,8 @@ doctor_nox/
   viewmodel.py  Qt-free filtering, grouping, badges, detail HTML (unit-tested)
   clinic.py     Qt-free doctor's side: verdict, vital signs, complaints,
                 follow-ups, the doctor's note (unit-tested)
-  record.py     the last checkup's conditions, for follow-ups
+  record.py     your chart: the last 30 checkups, for follow-ups and the prognosis
+  referral.py   the desktop tools a finding can open, and where to ask for help
   settings.py   your settings for the window (unit-tested)
   theme.py      Qt-free light/dark palettes, status colours, WCAG contrast helper
   gui.py        PySide6 Qt Widgets window, stylesheet, status-pill delegates,

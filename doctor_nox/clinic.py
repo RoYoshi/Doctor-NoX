@@ -49,13 +49,23 @@ SYMPTOMS = (
     Symptom(GENERAL, "Just a checkup"),
     Symptom("slow", "It's slow or freezes",
             ("hardware.cpu_memory", "hardware.sensors", "hardware.graphics", "storage.space",
-             "security.failed_units", "logs.boot"),
+             "security.failed_units", "system.startup", "logs.boot"),
             ("slow", "lag", "freez", "frozen", "stutter", "hang", "unresponsive", "sluggish")),
     Symptom("sound", "No sound",
             ("hardware.audio", "hardware.session", "security.failed_units", "logs.boot"),
-            ("sound", "audio", "speaker", "headphone", "headset", "mic", "volume", "mute", "hear")),
+            ("sound", "audio", "speaker", "headphone", "headset", "volume", "mute", "hear")),
+    Symptom("camera", "The camera or microphone isn't working",
+            ("hardware.capture", "hardware.audio", "hardware.session"),
+            ("camera", "webcam", "microphone", "mic", "video call", "zoom")),
+    Symptom("bluetooth", "Bluetooth isn't working",
+            ("hardware.bluetooth", "security.failed_units", "logs.boot"),
+            ("bluetooth", "pair", "airpods", "earbuds")),
+    Symptom("battery", "The battery drains fast",
+            ("hardware.battery", "hardware.cpu_memory", "hardware.sensors"),
+            ("battery", "charge", "charging", "drain", "unplugged")),
     Symptom("network", "No internet", ("network.", "security.firewall"),
-            ("internet", "wifi", "wi-fi", "network", "ethernet", "online", "offline", "connect", "dns", "router")),
+            ("internet", "wifi", "wi-fi", "network", "ethernet", "online", "offline", "connect", "dns", "router",
+             "signal")),
     Symptom("updates", "Updates won't install",
             ("updates.", "system.image", "storage.space", "network.route", "network.dns", "software."),
             ("update", "upgrade", "patch", "outdated")),
@@ -408,3 +418,200 @@ def pulse_y(points, x: float) -> float:
         if x0 <= x <= x1:
             return y0 if x1 == x0 else y0 + (y1 - y0) * (x - x0) / (x1 - x0)
     return points[0][1] if x < points[0][0] else points[-1][1]
+
+
+# ── treatment: the commands in it, and what they do ──────────────────────────
+# (how the command starts once "sudo" is taken off, what it does, whether it changes the system)
+COMMANDS = (
+    ("journalctl --disk-usage", "Shows how much space the logs take.", False),
+    ("journalctl", "Shows log messages.", False),
+    ("systemctl status", "Shows whether a service is running, and its last messages.", False),
+    ("systemctl --user status", "Shows whether one of your own services is running.", False),
+    ("systemctl is-enabled", "Shows whether a service starts by itself.", False),
+    ("systemctl disable", "Stops a service from starting by itself.", True),
+    ("systemd-analyze", "Shows what starting up spent its time on.", False),
+    ("rpm-ostree status", "Shows the installed system images.", False),
+    ("bootc status", "Shows the installed system images.", False),
+    ("rpm-ostree rollback", "Makes the previous system image the one that starts next.", True),
+    ("bootc rollback", "Makes the previous system image the one that starts next.", True),
+    ("rpm-ostree usroverlay", "Makes /usr writable until the next restart.", True),
+    ("bootc usr-overlay", "Makes /usr writable until the next restart.", True),
+    ("ostree admin pin", "Keeps a system image from being removed.", True),
+    ("pacman -Qdt", "Lists packages nothing needs any more.", False),
+    ("pacman -Dk", "Checks the package database for missing dependencies.", False),
+    ("pacman -Syu", "Updates every package.", True),
+    ("paccache", "Removes old downloaded packages.", True),
+    ("pacdiff", "Walks you through config files left by updates.", True),
+    ("rpmconf", "Walks you through config files left by updates.", True),
+    ("diff", "Shows the difference between two files.", False),
+    ("dnf upgrade", "Updates every package.", True),
+    ("dnf install", "Installs a package.", True),
+    ("dnf clean", "Removes downloaded package files.", True),
+    ("dnf autoremove", "Removes packages nothing needs any more.", True),
+    ("apt update", "Updates every package.", True),
+    ("apt install", "Installs a package.", True),
+    ("apt clean", "Removes downloaded package files.", True),
+    ("apt autoremove", "Removes packages nothing needs any more.", True),
+    ("apt --fix-broken", "Finishes or undoes a half-done package install.", True),
+    ("dpkg --configure", "Finishes setting up packages that were interrupted.", True),
+    ("zypper up", "Updates every package.", True),
+    ("zypper dup", "Upgrades the whole distribution.", True),
+    ("zypper clean", "Removes downloaded package files.", True),
+    ("snapper list", "Lists the snapshots that are kept.", False),
+    ("rpmdb --rebuilddb", "Rebuilds the package database from the installed packages.", True),
+    ("snap revert", "Puts a snap back to its previous version.", True),
+    ("flatpak override", "Changes what an app is allowed to reach.", True),
+    ("steamos-readonly", "Makes SteamOS's system partition writable.", True),
+    ("rm ", "Deletes a file.", True),
+    ("ln ", "Replaces a file with a link.", True),
+    ("doctor-nox", "Runs Doctor NoX from the terminal.", False),
+)
+
+
+def explain(command: str) -> str | None:
+    """One plain line on a command from a treatment, or None when it is not a command Doctor NoX knows."""
+    text = command.strip()
+    admin = text.startswith("sudo ")
+    bare = text[5:].lstrip() if admin else text
+    for start, does, changes in COMMANDS:
+        if bare == start.strip() or bare.startswith(start if start.endswith(" ") else start + " "):
+            if not changes:
+                return f"{does} Changes nothing."
+            return f"{does} This changes your system{', as administrator' if admin else ''}: read it first."
+    return None
+
+
+def commands(finding: dict) -> list[str]:
+    """The commands a finding's treatment mentions, in order, each once. Kernel options, group
+    names and the like are in back-ticks too, and are left out."""
+    found = []
+    for line in finding["guidance"]:
+        for text in re.findall(r"`([^`]+)`", line):
+            if explain(text) and text not in found:
+                found.append(text)
+    return found
+
+
+# ── checking one test again ──────────────────────────────────────────────────
+def probe_for(finding_id: str, probe_ids) -> str | None:
+    """The test a finding comes from: itself, or the test it is a sub-result of."""
+    owners = [p for p in probe_ids if finding_id == p or finding_id.startswith(p + ".")]
+    return max(owners, key=len) if owners else None
+
+
+def merge_recheck(report: dict, again: dict, probe_id: str) -> tuple[dict, list[tuple[str, str, str]]]:
+    """The report with one test's results replaced by a fresh run of it.
+
+    Returns the new report and (title, condition before, condition now) for each of its results.
+    The checkup's own time stays: the rest of it is still from then.
+    """
+    def owned(f):
+        return f["id"] == probe_id or f["id"].startswith(probe_id + ".")
+    before = {f["id"]: f["severity"] for f in report["findings"] if owned(f)}
+    fresh = [f for f in again["findings"] if owned(f)]
+    kept, placed = [], False
+    for f in report["findings"]:
+        if not owned(f):
+            kept.append(f)
+        elif not placed:
+            kept += fresh
+            placed = True
+    if not placed:
+        kept += fresh
+    merged = dict(report, findings=kept)
+    merged["totals"] = {sev: sum(1 for f in kept if f["severity"] == sev) for sev in report["totals"]}
+    merged["overall"] = _worst(kept) if kept else UNKNOWN
+    changes = [(f["title"], before.get(f["id"], ""), f["severity"]) for f in fresh]
+    return merged, changes
+
+
+def recheck_text(changes) -> str:
+    """'Free space: Healthy now (was Needs treatment).' / 'Free space: still Needs treatment.'"""
+    parts = []
+    for title, before, now in changes:
+        if before and before != now:
+            parts.append(f"{title}: {STATUS_TEXT[now]} now (was {STATUS_TEXT[before]}).")
+        else:
+            parts.append(f"{title}: still {STATUS_TEXT[now]}.")
+    return " ".join(parts) or "That test has nothing to report now."
+
+
+# ── the chart: figures kept from each checkup, and what they point to ────────
+_SIZE = {"MiB": 1 / 1024, "GiB": 1.0, "TiB": 1024.0}
+_DISK_SIZES = re.compile(r"^(?P<paths>.+?) \(.*\): (?P<free>[\d.]+) (?P<fu>MiB|GiB|TiB) free of "
+                         r"(?P<total>[\d.]+) (?P<tu>MiB|GiB|TiB) ")
+
+
+def metrics(report: dict) -> dict:
+    """The figures worth following from one checkup to the next: free space per filesystem (GiB)
+    and the hottest sensor (°C). Only what the tests reported; nothing is measured here."""
+    by_id = {f["id"]: f for f in report["findings"]}
+    out = {}
+    disks = {}
+    for line in by_id.get("storage.space", {}).get("evidence", []):
+        m = _DISK_SIZES.match(line)
+        if m:
+            disks[m.group("paths").split(" + ")[0]] = [round(float(m.group("free")) * _SIZE[m.group("fu")], 3),
+                                                       round(float(m.group("total")) * _SIZE[m.group("tu")], 3)]
+    if disks:
+        out["disk"] = disks
+    heat = re.search(r"(-?\d+) °C", by_id.get("hardware.sensors", {}).get("summary", ""))
+    if heat:
+        out["temperature"] = int(heat.group(1))
+    return out
+
+
+def _days(iso_a: str, iso_b: str) -> float:
+    a, b = datetime.datetime.fromisoformat(iso_a), datetime.datetime.fromisoformat(iso_b)
+    return (b - a).total_seconds() / 86400
+
+
+def _span(days: float) -> str:
+    if days < 14:
+        return f"{max(1, round(days))} day" + ("" if round(days) <= 1 else "s")
+    if days < 70:
+        return f"about {round(days / 7)} weeks"
+    return f"about {round(days / 30)} months"
+
+
+def prognosis(history: list[dict]) -> list[str]:
+    """Where things are heading, from the checkups on record (oldest first, the current one last).
+
+    Says something only when the record supports it: free space that keeps falling and would
+    run out within half a year, or a PC running clearly hotter than it has been.
+    """
+    usable = []
+    for entry in history:
+        try:
+            datetime.datetime.fromisoformat(entry["generated_at"])
+            usable.append(entry)
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(usable) < 3:
+        return []
+    out = []
+    now = usable[-1]
+    for path, (free, total) in sorted(now.get("metrics", {}).get("disk", {}).items()):
+        points = [(_days(e["generated_at"], now["generated_at"]), e["metrics"]["disk"][path][0]) for e in usable
+                  if path in e.get("metrics", {}).get("disk", {}) and _days(e["generated_at"], now["generated_at"]) <= 60]
+        if len(points) < 3 or points[0][0] < 3:
+            continue  # fewer than three checkups, or less than three days of them
+        n = len(points)
+        mean_x, mean_y = sum(-x for x, _ in points) / n, sum(y for _, y in points) / n
+        spread = sum((-x - mean_x) ** 2 for x, _ in points)
+        slope = sum((-x - mean_x) * (y - mean_y) for x, y in points) / spread if spread else 0.0  # GiB per day
+        lost = points[0][1] - free
+        if slope >= 0 or lost < max(1.0, total * 0.01):
+            continue
+        left = free / -slope
+        if left <= 183:
+            out.append(f"{path} has lost {lost:.0f} GiB in {_span(points[0][0])}. "
+                       f"At this rate it is full in {_span(left)}.")
+    earlier = [e["metrics"]["temperature"] for e in usable[:-1] if "temperature" in e.get("metrics", {})][-10:]
+    heat = now.get("metrics", {}).get("temperature")
+    if heat is not None and len(earlier) >= 3:
+        usual = sum(earlier) / len(earlier)
+        if heat - usual >= 12:
+            out.append(f"Running hotter than usual: {heat} °C now, {usual:.0f} °C over the last "
+                       f"{len(earlier)} checkups.")
+    return out

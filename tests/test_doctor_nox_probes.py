@@ -1035,6 +1035,109 @@ class StorageLayoutTests(Base):
         self.assertEqual(by_id(storage.layout(self.ctx()))["storage.home"].severity, "warn")
 
 
+class NewHardwareTests(Base):
+    def battery(self, name="BAT0", **files):
+        for key, value in files.items():
+            self.tree.write(f"/sys/class/power_supply/{name}/{key}", f"{value}\n")
+        return hardware.battery(self.ctx())
+
+    def test_battery_wear(self):
+        none = hardware.battery(self.ctx())
+        self.assertEqual((none.severity, none.summary), ("info", "No battery (a desktop, or none is reported)"))
+        self.tree.write("/sys/class/power_supply/AC/type", "Mains\n")
+        self.battery("hidpp_battery_0", type="Battery", scope="Device", energy_full=1, energy_full_design=10)
+        self.assertEqual(hardware.battery(self.ctx()).summary, none.summary, "a mouse's battery is not this PC's")
+        f = self.battery(type="Battery", energy_full=45_500_000, energy_full_design=50_000_000, cycle_count=212,
+                         status="Discharging", capacity=64)
+        self.assertEqual((f.severity, f.summary), ("pass", "Battery holds 91% of its capacity when new"))
+        self.assertEqual(f.evidence, ["BAT0: holds 91% of its capacity when new; discharging, 64% charged, "
+                                      "212 charge cycles"])
+        f = self.battery(energy_full=36_000_000)
+        self.assertEqual((f.severity, f.summary), ("info", "Battery holds 72% of its capacity when new: noticeably worn"))
+        f = self.battery(energy_full=24_000_000)
+        self.assertEqual(f.severity, "warn")
+        self.assertIn("badly worn", f.summary)
+        self.assertTrue(any("not a software fault" in g for g in f.guidance))
+        f = self.battery("BAT1", type="Battery", charge_full=5200, charge_full_design=5000)
+        self.assertTrue(any("BAT1: holds 100%" in e for e in f.evidence), "charge_* is read where energy_* is absent")
+        self.assertEqual(f.severity, "warn", "the worst battery decides")
+
+    def test_battery_without_wear_figures(self):
+        f = self.battery(type="Battery", status="Full")
+        self.assertEqual((f.severity, f.summary), ("info", "Battery present; its wear is not reported"))
+
+    def test_bluetooth_adapter_and_switches(self):
+        f = hardware.bluetooth(self.ctx())
+        self.assertEqual((f.severity, f.summary), ("info", "No Bluetooth adapter found"))
+        self.tree.mkdir("/sys/class/bluetooth/hci0")
+        self.tree.write("/sys/class/rfkill/rfkill0/type", "wlan\n")
+        self.tree.write("/sys/class/rfkill/rfkill0/soft", "1\n")
+        self.assertEqual(hardware.bluetooth(self.ctx()).severity, "pass", "another radio's switch is not Bluetooth's")
+        for soft, hard, severity, words in (("0", "0", "pass", "present and on"), ("1", "0", "info", "turned off"),
+                                            ("1", "1", "warn", "hardware switch")):
+            self.tree.write("/sys/class/rfkill/rfkill1/type", "bluetooth\n")
+            self.tree.write("/sys/class/rfkill/rfkill1/soft", soft + "\n")
+            self.tree.write("/sys/class/rfkill/rfkill1/hard", hard + "\n")
+            f = hardware.bluetooth(self.ctx())
+            self.assertEqual(f.severity, severity, words)
+            self.assertIn(words, f.summary)
+
+    def test_microphone_and_camera(self):
+        f = hardware.capture(self.ctx())
+        self.assertEqual((f.severity, f.summary), ("info", "No microphone or camera found"))
+        self.tree.write("/proc/asound/pcm", "00-00: ALC257 Analog : ALC257 Analog : playback 1 : capture 1\n"
+                                            "00-03: HDMI 0 : HDMI 0 : playback 1\n")
+        f = hardware.capture(self.ctx())
+        self.assertEqual((f.severity, f.summary), ("pass", "1 microphone input, no camera"))
+        for node in ("video0", "video1"):  # one camera shows up as two nodes
+            self.tree.write(f"/sys/class/video4linux/{node}/name", "Integrated Camera: Integrated C\n")
+        f = hardware.capture(self.ctx())
+        self.assertEqual(f.summary, "1 microphone input, 1 camera")
+        self.assertEqual(f.evidence, ["microphone input: ALC257 Analog", "camera: Integrated Camera: Integrated C"])
+
+
+WIRELESS = """\
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+wlan0: 0000   54.  {level}.  -256        0      0      0      0      0        0
+"""
+
+
+class WifiAndStartupTests(Base):
+    def test_wifi_signal_strength(self):
+        self.assertEqual(network.wifi(self.ctx()).summary, "No Wi-Fi connection in use")
+        for level, severity, summary in ((-48, "pass", "Strong Wi-Fi signal (-48 dBm)"),
+                                         (-66, "pass", "Good Wi-Fi signal (-66 dBm)"),
+                                         (-76, "info", "Weak Wi-Fi signal (-76 dBm)"),
+                                         (-88, "warn", "Very weak Wi-Fi signal (-88 dBm)")):
+            self.tree.write("/proc/net/wireless", WIRELESS.format(level=level))
+            f = network.wifi(self.ctx())
+            self.assertEqual((f.severity, f.summary), (severity, summary))
+            self.assertEqual(f.evidence, [f"wlan0: signal {level} dBm"])
+        self.tree.write("/proc/net/wireless", WIRELESS.format(level=60))
+        self.assertEqual(network.wifi(self.ctx()).severity, "info", "a level that is not dBm is not judged")
+        self.tree.write("/proc/net/wireless", "garbage\n\nwlan0: x\n")
+        self.assertEqual(network.wifi(self.ctx()).summary, "No Wi-Fi connection in use")
+
+    def startup(self, answer):
+        return system.startup(self.ctx({("systemd-analyze", "time"): answer}))
+
+    def test_startup_time(self):
+        f = self.startup(ok("Startup finished in 4.5s (firmware) + 2.1s (loader) + 1.2s (kernel) + 6.3s (userspace) "
+                            "= 14.2s\ngraphical.target reached after 6.2s in userspace.\n"))
+        self.assertEqual((f.severity, f.summary), ("pass", "Started up in 14 s"))
+        f = self.startup(ok("Startup finished in 3.1s (kernel) + 2min 9.800s (userspace) = 2min 12.900s\n"))
+        self.assertEqual((f.severity, f.summary), ("info", "Starting up took 2 min 12 s"))
+        self.assertTrue(any("systemd-analyze blame" in g for g in f.guidance))
+        f = self.startup(ok("Bootup is not yet finished (org.freedesktop.systemd1.Manager.FinishTimestampMonotonic=0).\n"))
+        self.assertEqual(f.severity, "unknown")
+        self.assertIn("not yet finished", f.reason)
+        self.assertEqual(self.startup(exit_(1, stderr="System has not been booted with systemd")).severity, "unknown")
+        self.assertEqual(self.startup(MISSING).severity, "unknown")
+        self.assertEqual([system._seconds(t) for t in ("850ms", "14.2s", "2min 12.900s", "1h 2min 3s", "soon")],
+                         [0.85, 14.2, 132.9, 3723.0, None])
+
+
 class FreeSpaceTests(Base):
     def space(self, mounts, sizes, name="debian"):
         self.distro(name)

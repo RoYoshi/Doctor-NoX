@@ -68,6 +68,7 @@ ALLOWED: dict[str, CommandSpec] = {
         ("is-enabled", UNITS),
         ("show", UNITS, "--no-pager", SHOW_PROPS),
     )),
+    "systemd-analyze": CommandSpec(("/usr/bin/systemd-analyze",), (("time",),), timeout=10.0),
     "getenforce": CommandSpec(("/usr/sbin/getenforce", "/usr/bin/getenforce"), ((),), timeout=5.0),
     "journalctl": CommandSpec(("/usr/bin/journalctl",), (
         # no --quiet: it would hide journalctl's "not seeing system messages" access hint

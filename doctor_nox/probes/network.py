@@ -171,3 +171,33 @@ def manager(ctx):
         return finding("network.manager", CAT, "NetworkManager", INFO, f"NetworkManager reports {state}", evidence=ev)
     return finding("network.manager", CAT, "NetworkManager", INFO, f"NetworkManager state: {state or 'unknown'}",
                    evidence=ev)
+
+
+@probe("network.wifi", CAT, "Wi-Fi signal")
+def wifi(ctx):
+    """How strong the wireless signal is, from /proc/net/wireless. Wi-Fi network names are never read."""
+    title = "Wi-Fi signal"
+    links = []
+    for line in (ctx.try_text("/proc/net/wireless", 16 * 1024) or "").splitlines()[2:]:
+        fields = line.replace(":", " ").split()
+        try:
+            links.append((fields[0], float(fields[3].rstrip("."))))
+        except (IndexError, ValueError):
+            continue
+    if not links:
+        return finding("network.wifi", CAT, title, INFO, "No Wi-Fi connection in use")
+    ev = [f"{name}: signal {level:.0f} dBm" if level < 0 else f"{name}: signal level {level:.0f} (not in dBm)"
+          for name, level in links]
+    measured = [level for _name, level in links if level < 0]
+    if not measured:
+        return finding("network.wifi", CAT, title, INFO, "Wi-Fi is connected; its signal is not reported in dBm",
+                       evidence=ev)
+    level = max(measured)
+    if level >= -70:
+        return finding("network.wifi", CAT, title, PASS,
+                       f"{'Strong' if level >= -60 else 'Good'} Wi-Fi signal ({level:.0f} dBm)", evidence=ev)
+    return finding("network.wifi", CAT, title, WARN if level < -80 else INFO,
+                   f"{'Very weak' if level < -80 else 'Weak'} Wi-Fi signal ({level:.0f} dBm)", evidence=ev,
+                   guidance=["A weak signal makes the connection slow and drop. Move closer to the router, or "
+                             "move the router away from walls, metal and other electronics.",
+                             "Closer to 0 is stronger: -50 dBm is excellent, -80 dBm barely holds."])
