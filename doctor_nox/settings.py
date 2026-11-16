@@ -25,6 +25,7 @@ DEFAULTS = {
     "checkup_at_launch": True,   # examine as soon as the window opens
     "remember": True,            # keep a chart of checkups for follow-ups (record.py)
     "monitor_motion": True,      # the heart monitor sweeps during a checkup
+    "own_frame": True,           # Doctor NoX's own title bar instead of the desktop's window frame
     "skip_areas": [],            # areas left out of a checkup
     "deadline": 60,              # seconds before a checkup is stopped
 }
@@ -44,7 +45,7 @@ def clean(data) -> dict:
         return out
     if data.get("theme") in MODES:
         out["theme"] = data["theme"]
-    for key in ("checkup_at_launch", "remember", "monitor_motion"):
+    for key in ("checkup_at_launch", "remember", "monitor_motion", "own_frame"):
         if isinstance(data.get(key), bool):
             out[key] = data[key]
     skip = data.get("skip_areas")

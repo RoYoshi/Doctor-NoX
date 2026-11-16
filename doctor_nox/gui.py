@@ -12,10 +12,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import traceback
 
-from PySide6.QtCore import (QEvent, QPointF, QProcess, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer,
-                            QUrl, Signal, Slot)
+from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QProcess, QPropertyAnimation, QRect, QRectF, QSize,
+                            QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot)
 from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics,
                            QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QShortcut)
@@ -41,6 +42,8 @@ SEV_ROLE = Qt.ItemDataRole.UserRole + 1         # results table: severity key of
 NAV_BADGE_ROLE = Qt.ItemDataRole.UserRole + 2   # sidebar: pill text ("3", "OK", "")
 NAV_SEV_ROLE = Qt.ItemDataRole.UserRole + 3     # sidebar: pill severity ("" for none)
 CHANGE_COLUMN = 4                               # results table: "Since last checkup"
+ENV_FRAME = "DOCTOR_NOX_FRAME"                  # own | system: overrides the title bar setting (a way back)
+SWEEP_SECONDS = 1.6                             # the heart monitor: one pass across the strip
 SUBTITLE = "A doctor for your PC. Examines and prescribes; never operates."
 SAFETY_NOTE = "Examines only · no root · no network requests · nothing uploaded or changed"
 QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (stylesheet parse errors fail the test)
@@ -177,12 +180,19 @@ def build_palette(t: Theme) -> QPalette:
     return palette
 
 
-def stylesheet(t: Theme) -> str:
+def stylesheet(t: Theme, own_frame: bool = False) -> str:
     chips = "".join(
         f"""QToolButton[sev="{sev}"]:checked {{ background: {s.bg}; color: {s.fg}; border-color: {s.border}; }}
     """ for sev, s in t.status.items())
+    edge = f"QWidget#host {{ border: 1px solid {t.border_strong}; }}" if own_frame else ""
     return f"""
     QMainWindow, QWidget#host {{ background: {t.window}; }}
+    {edge}
+    QFrame#titlebar {{ background: {t.surface}; border-bottom: 1px solid {t.border}; }}
+    QToolButton[windowButton="true"] {{ background: transparent; border: none; border-radius: 6px;
+                 padding: 6px 8px; }}
+    QToolButton[windowButton="true"]:hover {{ background: {t.hover}; }}
+    QToolButton[windowButton="true"]:pressed {{ background: {t.border}; }}
     QWidget {{ color: {t.text}; }}
     QLabel#subtitle, QLabel#snapshot, QLabel#safety, QLabel#section {{ color: {t.muted}; }}
     QLabel#verdict {{ border-radius: 13px; padding: 4px 14px; font-weight: 600; }}
@@ -278,11 +288,35 @@ def paint_pill(painter: QPainter, rect: QRectF, text: str, font: QFont, status) 
     painter.restore()
 
 
-def dot_icon(on_colour: str, off_colour: str) -> QIcon:
+def window_icon(kind: str, colour: str, ratio: float = 1.0) -> QIcon:
+    """The title bar's own buttons, drawn rather than taken from a font or a theme: a line
+    (minimize), a square (maximize) or a cross (close), sharp at any screen scale."""
+    pix = QPixmap(round(12 * ratio), round(12 * ratio))
+    pix.setDevicePixelRatio(ratio)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    pen = QPen(QColor(colour), 1.3)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "minimize":
+        painter.drawLine(QPointF(2.5, 9.5), QPointF(9.5, 9.5))
+    elif kind == "maximize":
+        painter.drawRect(QRectF(2.5, 2.5, 7, 7))
+    else:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.drawLine(QPointF(2.5, 2.5), QPointF(9.5, 9.5))
+        painter.drawLine(QPointF(9.5, 2.5), QPointF(2.5, 9.5))
+    painter.end()
+    return QIcon(pix)
+
+
+def dot_icon(on_colour: str, off_colour: str, ratio: float = 1.0) -> QIcon:
     """Status dot for the filter chips: coloured when shown, grey when filtered out."""
     icon = QIcon()
     for colour, state in ((on_colour, QIcon.State.On), (off_colour, QIcon.State.Off)):
-        pix = QPixmap(12, 12)
+        pix = QPixmap(round(12 * ratio), round(12 * ratio))
+        pix.setDevicePixelRatio(ratio)
         pix.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -450,8 +484,10 @@ class PulseLine(QWidget):
         self.running = False
         self.motion = True
         self.phase = 0.0
+        self.settling = False   # one last sweep in the condition's colour after a checkup ends
+        self._since = 0.0
         self.timer = QTimer(self)
-        self.timer.setInterval(40)
+        self.timer.setInterval(16)  # about 60 frames a second; the phase follows the clock, not the ticks
         self.timer.timeout.connect(self._tick)
         self.setMinimumSize(60, 34)
         self.setMaximumHeight(40)
@@ -462,18 +498,31 @@ class PulseLine(QWidget):
         return QSize(240, 36)
 
     def set_state(self, colour: str, running: bool, motion: bool):
+        ended = self.running and not running
         self.colour, self.running, self.motion = colour, running, motion
         if running and motion:
+            self.settling = False
             if not self.timer.isActive():
+                self._since = time.monotonic()
                 self.timer.start()
-        else:
+        elif ended and motion:
+            self.settling, self._since, self.phase = True, time.monotonic(), 0.0
+            self.timer.start()
+        elif not self.settling or not motion:
+            self.settling = False
             self.timer.stop()
             self.phase = 0.0
         self.setAccessibleDescription("Examining" if running else "At rest")
         self.update()
 
     def _tick(self):
-        self.phase = (self.phase + 0.0125) % 1.0
+        passed = (time.monotonic() - self._since) / SWEEP_SECONDS
+        if self.settling and passed >= 1.0:
+            self.settling = False
+            self.timer.stop()
+            self.phase = 0.0
+        else:
+            self.phase = passed % 1.0
         self.update()
 
     def paintEvent(self, _event):
@@ -491,7 +540,7 @@ class PulseLine(QWidget):
             pen = QPen(colour, 1.6)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            if not (self.running and self.motion):
+            if not ((self.running or self.settling) and self.motion):
                 painter.setPen(pen)
                 painter.drawPath(path)
                 return
@@ -515,6 +564,30 @@ class PulseLine(QWidget):
             print(f"Doctor NoX: paint error\n{self._window.paint_errors[-1]}", file=sys.stderr, flush=True)
         finally:
             painter.end()
+
+
+class TitleBar(QFrame):
+    """The window's header, which is also its title bar when Doctor NoX draws its own frame:
+    drag it to move the window, double-click it to maximize."""
+
+    def __init__(self, window):
+        super().__init__(window, objectName="titlebar")
+        self._window = window
+
+    def mousePressEvent(self, event):
+        handle = self._window.windowHandle()
+        if self._window.own_frame and event.button() == Qt.MouseButton.LeftButton and handle is not None:
+            handle.startSystemMove()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._window.own_frame and event.button() == Qt.MouseButton.LeftButton:
+            self._window.toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class SettingsDialog(QDialog):
@@ -554,6 +627,10 @@ class SettingsDialog(QDialog):
             hint(f"{themes.ENV_MODE} is set in the environment, so it decides the theme until it is removed.")
         self.motion = QCheckBox("Animate the heart monitor during a checkup")
         layout.addWidget(self.motion)
+        self.own_frame = QCheckBox("Use Doctor NoX's own title bar instead of the desktop's window frame")
+        layout.addWidget(self.own_frame)
+        hint("Applies the next time Doctor NoX opens. With its own title bar: drag the header to move, "
+             "double-click it to maximize, and resize from the bottom-right corner.")
 
         heading("Checkups")
         self.at_launch = QCheckBox("Start a checkup when Doctor NoX opens")
@@ -598,6 +675,7 @@ class SettingsDialog(QDialog):
         for mode, button in self.theme_buttons.items():
             button.setChecked(mode == values["theme"])
         self.motion.setChecked(values["monitor_motion"])
+        self.own_frame.setChecked(values["own_frame"])
         self.at_launch.setChecked(values["checkup_at_launch"])
         self.remember.setChecked(values["remember"])
         self.deadline.setValue(values["deadline"])
@@ -607,7 +685,7 @@ class SettingsDialog(QDialog):
     def values(self) -> dict:
         theme = next((mode for mode, button in self.theme_buttons.items() if button.isChecked()), themes.SYSTEM)
         return settings_store.clean({
-            "theme": theme, "monitor_motion": self.motion.isChecked(),
+            "theme": theme, "monitor_motion": self.motion.isChecked(), "own_frame": self.own_frame.isChecked(),
             "checkup_at_launch": self.at_launch.isChecked(), "remember": self.remember.isChecked(),
             "deadline": self.deadline.value(),
             "skip_areas": [key for key, box in self.area_boxes.items() if not box.isChecked()]})
@@ -691,6 +769,10 @@ class Window(QMainWindow):
         # The desktop's palette before Doctor applies its own; used to follow the system scheme.
         self._system_palette = QPalette(QGuiApplication.palette())
         # DOCTOR_NOX_THEME, when set, decides the theme; otherwise your setting does.
+        frame = os.environ.get(ENV_FRAME, "").strip().lower()
+        self.own_frame = frame == "own" if frame in ("own", "system") else self.settings["own_frame"]
+        if self.own_frame:
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         asked = os.environ.get(themes.ENV_MODE, "").strip().lower()
         self.theme_locked = asked in themes.MODES
         self.theme_mode = asked if self.theme_locked else self.settings["theme"]
@@ -720,15 +802,22 @@ class Window(QMainWindow):
     def _build(self):
         host = QWidget(objectName="host")
         self.setCentralWidget(host)
-        root = QVBoxLayout(host)
-        root.setContentsMargins(18, 14, 18, 12)
+        outer = QVBoxLayout(host)
+        outer.setContentsMargins(1, 1, 1, 0) if self.own_frame else outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.titlebar = TitleBar(self)
+        outer.addWidget(self.titlebar)
+        root = QVBoxLayout()
+        root.setContentsMargins(18, 12, 18, 12)
         root.setSpacing(12)
+        outer.addLayout(root, 1)
 
         # Header: identity on the left, overall state on the right.
-        head = QHBoxLayout()
+        head = QHBoxLayout(self.titlebar)
+        head.setContentsMargins(18, 10, 10 if self.own_frame else 18, 10)
         head.setSpacing(12)
         logo = QLabel()
-        logo.setPixmap(app_icon().pixmap(40, 40))
+        logo.setPixmap(app_icon().pixmap(QSize(40, 40), self.devicePixelRatioF()))
         logo.setAccessibleName("Doctor NoX icon")
         head.addWidget(logo)
         titles = QVBoxLayout()
@@ -750,7 +839,24 @@ class Window(QMainWindow):
         right.addWidget(self.verdict, 0, Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.snapshot, 0, Qt.AlignmentFlag.AlignRight)
         head.addLayout(right)
-        root.addLayout(head)
+        # Its own window buttons, when Doctor NoX draws its own frame.
+        self.window_buttons = {}
+        controls = QHBoxLayout()
+        controls.setSpacing(2)
+        for kind, name, slot in (("minimize", "Minimize", self.showMinimized),
+                                 ("maximize", "Maximize or restore", self.toggle_maximized),
+                                 ("close", "Close", self.close)):
+            button = QToolButton()
+            button.setProperty("windowButton", True)
+            button.setIconSize(QSize(12, 12))
+            button.setToolTip(name)
+            button.setAccessibleName(name)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # the desktop's own shortcuts cover these
+            button.clicked.connect(slot)
+            button.setVisible(self.own_frame)
+            self.window_buttons[kind] = button
+            controls.addWidget(button)
+        head.addLayout(controls)
 
         # The consultation: what's wrong on the left, the checkup and its paperwork on the right.
         consult = QHBoxLayout()
@@ -783,6 +889,9 @@ class Window(QMainWindow):
         self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
         self.progress.setAccessibleName("Checkup progress")
+        self.progress_glide = QPropertyAnimation(self.progress, b"value", self)  # the bar fills, never jumps
+        self.progress_glide.setDuration(220)
+        self.progress_glide.setEasingCurve(QEasingCurve.Type.OutCubic)
         consult.addWidget(self.progress)
         self.cancel_btn = QPushButton("Cancel", visible=False)
         self.cancel_btn.setToolTip("Stop the checkup (Esc)")
@@ -893,6 +1002,7 @@ class Window(QMainWindow):
         self.nav.setAccessibleName("Areas examined")
         self.nav.setMinimumWidth(190)
         self.nav.setUniformItemSizes(True)
+        self.nav.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.nav_delegate = NavDelegate(self)
         self.nav.setItemDelegate(self.nav_delegate)
         self.nav.currentItemChanged.connect(self._category_changed)
@@ -911,6 +1021,7 @@ class Window(QMainWindow):
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setAccessibleName("Findings")
+        self.tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # glides, not row jumps
         self.status_delegate = StatusDelegate(self)
         self.tree.setItemDelegateForColumn(0, self.status_delegate)
         hdr = self.tree.header()
@@ -954,8 +1065,8 @@ class Window(QMainWindow):
         self.safety.setAccessibleName("Doctor NoX only examines: it needs no root, makes no network requests, "
                                       "uploads nothing and changes nothing on your system")
         self.statusBar().addPermanentWidget(self.safety)
-        self.statusBar().setSizeGripEnabled(False)
-        self.statusBar().showMessage(clinic.MOTTO)
+        self.statusBar().setSizeGripEnabled(self.own_frame)  # its own frame has no edges to drag
+        self.statusBar().showMessage(clinic.greeting(datetime.datetime.now().hour))
 
     # theme -------------------------------------------------------------------
     def set_theme_mode(self, mode: str):
@@ -1004,11 +1115,13 @@ class Window(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setPalette(build_palette(t))
-        self.setStyleSheet(stylesheet(t))
+        self.setStyleSheet(stylesheet(t, self.own_frame))
         font = pill_font(self.font())
         self.pill_width = max(pill_size(font, text).width() for text in STATUS_TEXT.values())
         for sev, button in self.sev_buttons.items():
-            button.setIcon(dot_icon(t.status[sev].fg, t.subtle))
+            button.setIcon(dot_icon(t.status[sev].fg, t.subtle, self.devicePixelRatioF()))
+        for kind, button in self.window_buttons.items():
+            button.setIcon(window_icon(kind, t.muted, self.devicePixelRatioF()))
         self.empty_mark.setPixmap(nox_mark(t, 96, self.devicePixelRatioF()))
         for mode, action in self.theme_actions.items():
             action.setChecked(mode == self.theme_mode)
@@ -1094,6 +1207,9 @@ class Window(QMainWindow):
             self.cancel_btn.setEnabled(False)
             self.statusBar().showMessage("Stopping the checkup… ending the tests that are running.")
 
+    def toggle_maximized(self):
+        self.showNormal() if self.isMaximized() else self.showMaximized()
+
     def _escape(self):
         if self.scanning():
             self.cancel_scan()
@@ -1112,8 +1228,13 @@ class Window(QMainWindow):
     def _progress(self, done, total, title):
         if not self._on_gui_thread("_progress"):
             return
-        self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(done)
+        if self.progress.maximum() != max(total, 1) * 100:
+            self.progress.setRange(0, max(total, 1) * 100)
+            self.progress.setValue(0)
+        self.progress_glide.stop()
+        self.progress_glide.setStartValue(self.progress.value())
+        self.progress_glide.setEndValue(done * 100)
+        self.progress_glide.start()
         self.statusBar().showMessage(f"Examining {done} of {total}: {title}")
 
     @Slot(object, int)
@@ -1217,12 +1338,14 @@ class Window(QMainWindow):
             self._set_verdict(themes.HEADLINE[state] + ("" if complete else " (stopped early)"), state,
                               f"{themes.HEADLINE[state]}: {counts}")
             stamp = datetime.datetime.fromisoformat(self.report["generated_at"]).astimezone()
+            self.setWindowTitle(f"{themes.HEADLINE[state]} - Doctor NoX")
             self.snapshot.setText(f"Last checkup {stamp:%Y-%m-%d %H:%M}, "
                                   f"took {vm.duration_text(self.report['duration_ms'])}")
             totals = self.report["totals"]
             for sev, button in self.sev_buttons.items():
                 button.setText(f"{STATUS_TEXT[sev]}  {totals[sev]}")
         else:
+            self.setWindowTitle("Doctor NoX")
             self._set_verdict("Examining…" if self.scanning() else "No checkup yet", None, "No findings yet")
             self.snapshot.setText("")
             for sev, button in self.sev_buttons.items():
@@ -1902,8 +2025,22 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     app.processEvents()
     check(window.symptom == clinic.GENERAL and window.tree.topLevelItemCount() == 7,
           "a complaint with no tests shows the whole checkup")
-    check(not window.pulse.running and not window.pulse.timer.isActive() and window.pulse.colour
-          == window.theme.status["error"].fg, "the heart monitor rests in the condition's colour")
+    check(pump(lambda: not window.pulse.timer.isActive(), 5) and not window.pulse.running
+          and window.pulse.colour == window.theme.status["error"].fg,
+          "the heart monitor gives one last beat, then rests in the condition's colour")
+    check(window.windowTitle() == "Needs treatment - Doctor NoX", "the window title carries the condition")
+
+    # 1b''. its own frame: the header is the title bar
+    frameless = bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+    check(window.own_frame and frameless and all(b.isVisible() and not b.icon().isNull()
+                                                 for b in window.window_buttons.values())
+          and window.statusBar().isSizeGripEnabled(), "Doctor NoX draws its own title bar, buttons and resize grip")
+    window.toggle_maximized()
+    app.processEvents()
+    grown = window.isMaximized()
+    window.toggle_maximized()
+    app.processEvents()
+    check(grown and not window.isMaximized(), "its maximize button maximizes and restores")
 
     # 1c. settings: they apply, are saved, and can be put back
     dialog = window.open_settings()
@@ -1913,12 +2050,14 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     dialog.area_boxes["logs"].setChecked(False)
     dialog.remember.setChecked(False)
     dialog.motion.setChecked(False)
+    dialog.own_frame.setChecked(False)
     dialog.deadline.setValue(20)
     window.apply_settings(dialog.values())
     app.processEvents()
     kept = settings_store.load(settings_path)
     check(window.theme is themes.LIGHT_THEME and kept["theme"] == "light" and kept["skip_areas"] == ["logs"]
-          and kept["deadline"] == 20 and oct(settings_path.stat().st_mode & 0o777) == "0o600",
+          and kept["deadline"] == 20 and kept["own_frame"] is False and window.own_frame
+          and oct(settings_path.stat().st_mode & 0o777) == "0o600",
           "settings apply at once and are saved, privately")
     check(not record_path.exists() and window.follow is None and window.record_path is None,
           "turning off remembering deletes the remembered checkup")
@@ -1941,7 +2080,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     inside = window.rect()
     parts = [window.complaint, window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn,
              window.more_btn, window.pulse, window.search, *window.sev_buttons.values(),
-             *window.vital_tiles.values()]
+             *window.vital_tiles.values(), *window.window_buttons.values()]
     outside = [w.accessibleName() or w.text() for w in parts if not w.isVisible() or not inside.contains(
         QRect(w.mapTo(window, w.rect().topLeft()), w.size()))]
     needs = window.minimumSizeHint().width()

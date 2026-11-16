@@ -74,6 +74,17 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
 | **Note** | INFO | worth knowing, not a problem |
 | **Healthy** | PASS | examined and healthy |
 
+- **Its own title bar:** Doctor NoX draws its own window frame, so it looks
+  the same on every desktop. The header is the title bar: drag it to move the
+  window, double-click it to maximize, use its three buttons to minimize,
+  maximize and close, and resize from the grip in the bottom-right corner.
+  The desktop's own shortcuts for moving and resizing a window still work.
+  - To use the desktop's window frame instead: Settings → *Use Doctor NoX's
+    own title bar* (off), or start it with `DOCTOR_NOX_FRAME=system`. Either
+    applies the next time it opens. The variable is the way back if the title
+    bar ever misbehaves on a desktop.
+  - The window's title, which the task bar shows, carries the condition: "In
+    good health - Doctor NoX".
 - **Header:** the Doctor NoX icon, the distribution · image type · kernel, and
   the overall condition as a coloured pill with a plain-language headline:
   - **Needs treatment**: at least one test needs treatment;
@@ -84,8 +95,9 @@ keep the severities, see [Severity](#severity--what-each-level-promises)):
   The time and duration of the last checkup sit under the pill.
 - **Heart monitor:** between the name and the pill, an ECG trace in the overall
   condition's colour. While a checkup runs, a bright head sweeps along it as on
-  a bedside monitor. It is decoration: the condition is always written beside
-  it, and the sweep can be turned off in Settings.
+  a bedside monitor, and when the checkup ends it gives one last beat in the
+  new condition's colour. It is decoration: the condition is always written
+  beside it, and the motion can be turned off in Settings.
 - **What's wrong?** Tell the doctor the complaint, in your own words or from
   the list.
   - **Type it** ("no sound", "my wifi keeps dropping", "games stutter") and
@@ -199,6 +211,7 @@ Defaults** puts everything back.
 |---|---|---|
 | Appearance | Match system | Match system follows the desktop's light or dark setting and switches when it does; Light and Dark keep one theme |
 | Animate the heart monitor | on | whether the trace sweeps during a checkup |
+| Use Doctor NoX's own title bar | on | off: the desktop's window frame; applies the next time it opens |
 | Start a checkup when Doctor NoX opens | on | off: the window opens and waits for **Start checkup** |
 | Remember my checkups | on | follow-ups, the prognosis and the chart; turning it off deletes them |
 | Stop a checkup after | 60 seconds | 5 to 300, the same limits as `--deadline` |

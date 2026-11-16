@@ -641,6 +641,22 @@ class ClinicTests(unittest.TestCase):
             self.assertEqual(clinic.guess(symptom.words[0]), symptom.key, "its own first word means it")
             self.assertTrue(all(word == word.lower() for word in symptom.words), symptom.key)
 
+    def test_the_greeting_follows_the_clock(self):
+        self.assertEqual(clinic.greeting(8), "Good morning. Doctor NoX is in the house!")
+        self.assertEqual([clinic.greeting(h).split(".")[0] for h in (0, 4, 5, 11, 12, 17, 18, 21, 22, 23)],
+                         ["Night shift", "Night shift", "Good morning", "Good morning", "Good afternoon",
+                          "Good afternoon", "Good evening", "Good evening", "Night shift", "Night shift"])
+
+    def test_the_window_can_always_get_its_desktop_frame_back(self):
+        source = (PKG / "gui.py").read_text()
+        self.assertIn('ENV_FRAME = "DOCTOR_NOX_FRAME"', source)
+        self.assertIn('self.own_frame = frame == "own" if frame in ("own", "system") else self.settings["own_frame"]',
+                      source)
+        self.assertEqual(source.count("FramelessWindowHint, True"), 1)
+        self.assertIn("if self.own_frame:\n            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)",
+                      source)
+        self.assertIn("setSizeGripEnabled(self.own_frame)", source)
+
     def test_the_heart_monitor_trace_fits_its_strip(self):
         for width, height in ((240, 36), (60, 34), (900, 40), (35, 34)):
             points = clinic.pulse(width, height)
@@ -855,16 +871,17 @@ class SettingsTests(unittest.TestCase):
     def test_defaults_and_anything_unusable_falls_back(self):
         defaults = settings.clean(None)
         self.assertEqual(defaults, {"theme": "system", "checkup_at_launch": True, "remember": True,
-                                    "monitor_motion": True, "skip_areas": [], "deadline": 60})
+                                    "monitor_motion": True, "own_frame": True, "skip_areas": [], "deadline": 60})
         self.assertIsNot(settings.clean(None)["skip_areas"], settings.DEFAULTS["skip_areas"])
         for junk in ([], "x", 5, {"theme": "neon", "remember": "yes", "deadline": "soon", "skip_areas": "logs"},
                      {"deadline": True}, {"skip_areas": list(settings.AREAS)}, {"unknown": 1}):
             self.assertEqual(settings.clean(junk), defaults, junk)
         mine = settings.clean({"theme": "dark", "checkup_at_launch": False, "remember": False,
-                               "monitor_motion": False, "skip_areas": ["logs", "nonsense", "hardware"],
-                               "deadline": 9000})
+                               "monitor_motion": False, "own_frame": False,
+                               "skip_areas": ["logs", "nonsense", "hardware"], "deadline": 9000})
         self.assertEqual(mine, {"theme": "dark", "checkup_at_launch": False, "remember": False,
-                                "monitor_motion": False, "skip_areas": ["hardware", "logs"], "deadline": 300})
+                                "monitor_motion": False, "own_frame": False, "skip_areas": ["hardware", "logs"],
+                                "deadline": 300})
         self.assertEqual(settings.clean({"deadline": 1})["deadline"], 5)
         self.assertEqual(settings.clean({"deadline": 42.9})["deadline"], 42)
         self.assertEqual(set(settings.AREAS), set(model.CATEGORY_TITLE))

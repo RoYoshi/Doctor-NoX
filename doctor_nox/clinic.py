@@ -31,6 +31,19 @@ from .theme import HEADLINE, STATUS_TEXT, status_count
 # How much care a condition asks for. INFO and PASS ask for none.
 CONCERN = {ERROR: 3, WARN: 2, UNKNOWN: 1, INFO: 0, PASS: 0}
 MOTTO = "Doctor NoX is in the house!"
+
+
+def greeting(hour: int) -> str:
+    """What the status bar says when the window opens. NoX is night, so the night gets its own line."""
+    if 5 <= hour < 12:
+        hello = "Good morning."
+    elif 12 <= hour < 18:
+        hello = "Good afternoon."
+    elif 18 <= hour < 22:
+        hello = "Good evening."
+    else:
+        hello = "Night shift."
+    return f"{hello} {MOTTO}"
 PRESCRIBE_ONLY = "I only examine and prescribe: nothing on this PC was changed, nothing was sent anywhere."
 ASK_FOR_HELP = "Copy the doctor's note and share it where you ask for help."
 
