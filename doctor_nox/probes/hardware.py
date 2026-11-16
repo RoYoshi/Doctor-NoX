@@ -415,3 +415,105 @@ def sensors(ctx):
                        evidence=ev, guidance=["Check cooling/airflow; the hardware may throttle or shut down."])
     return finding("hardware.sensors", CAT, "Temperatures", PASS,
                    f"Hottest sensor {readings[0][0]:.0f} °C; none at a reported critical limit", evidence=ev)
+
+
+def _number(ctx, path):
+    try:
+        return int((ctx.try_text(path, 64) or "").strip())
+    except ValueError:
+        return None
+
+
+@probe("hardware.battery", CAT, "Battery")
+def battery(ctx):
+    """How much of its original capacity the laptop's battery still holds. Read from /sys only."""
+    title, base = "Battery", "/sys/class/power_supply"
+    worst, ev = None, []
+    for name in sorted(ctx.listdir(base)):
+        if (ctx.try_text(f"{base}/{name}/type", 32) or "").strip() != "Battery":
+            continue
+        if (ctx.try_text(f"{base}/{name}/scope", 32) or "").strip() == "Device":
+            continue  # a mouse's or controller's own battery, not this computer's
+        full = design = None
+        for kind in ("energy", "charge"):
+            full, design = _number(ctx, f"{base}/{name}/{kind}_full"), _number(ctx, f"{base}/{name}/{kind}_full_design")
+            if full and design:
+                break
+        cycles = _number(ctx, f"{base}/{name}/cycle_count")
+        state = (ctx.try_text(f"{base}/{name}/status", 32) or "").strip().lower() or "state not reported"
+        level = _number(ctx, f"{base}/{name}/capacity")
+        if not full or not design:
+            ev.append(f"{name}: {state}; capacity when new not reported")
+            continue
+        health = min(100, round(100 * full / design))
+        ev.append(f"{name}: holds {health}% of its capacity when new; {state}"
+                  + (f", {level}% charged" if level is not None else "")
+                  + (f", {cycles} charge cycles" if cycles else ""))
+        worst = health if worst is None else min(worst, health)
+    if not ev:
+        return finding("hardware.battery", CAT, title, INFO, "No battery (a desktop, or none is reported)")
+    if worst is None:
+        return finding("hardware.battery", CAT, title, INFO, "Battery present; its wear is not reported", evidence=ev)
+    if worst >= 80:
+        return finding("hardware.battery", CAT, title, PASS,
+                       f"Battery holds {worst}% of its capacity when new", evidence=ev)
+    worn = "badly worn" if worst < 60 else "noticeably worn"
+    return finding("hardware.battery", CAT, title, WARN if worst < 60 else INFO,
+                   f"Battery holds {worst}% of its capacity when new: {worn}", evidence=ev,
+                   guidance=["Wear is normal ageing, not a software fault: a charge lasts about that share of "
+                             "what it did when new.",
+                             "A replacement battery restores the runtime. Until then, lower screen brightness "
+                             "and your desktop's power-saving profile stretch a charge."])
+
+
+@probe("hardware.bluetooth", CAT, "Bluetooth")
+def bluetooth(ctx):
+    """Whether there is a Bluetooth adapter and whether a switch has it turned off. Read from /sys only."""
+    title = "Bluetooth"
+    adapters = sorted(n for n in ctx.listdir("/sys/class/bluetooth") if re.fullmatch(r"hci\d+", n))
+    ev, soft, hard = [f"adapters: {', '.join(adapters) or 'none'}"], False, False
+    for name in sorted(ctx.listdir("/sys/class/rfkill")):
+        base = f"/sys/class/rfkill/{name}"
+        if (ctx.try_text(f"{base}/type", 32) or "").strip() != "bluetooth":
+            continue
+        s, h = _number(ctx, f"{base}/soft") == 1, _number(ctx, f"{base}/hard") == 1
+        ev.append(f"{name}: " + ("off by a hardware switch or the firmware" if h else "turned off" if s else "on"))
+        soft, hard = soft or s, hard or h
+    if not adapters and len(ev) == 1:
+        return finding("hardware.bluetooth", CAT, title, INFO, "No Bluetooth adapter found", evidence=ev)
+    if hard:
+        return finding("hardware.bluetooth", CAT, title, WARN,
+                       "Bluetooth is off by a hardware switch or the firmware", evidence=ev,
+                       guidance=["Look for an airplane-mode or wireless key (often Fn with a function key), or a "
+                                 "wireless setting in the firmware setup. Software cannot turn it back on."])
+    if soft:
+        return finding("hardware.bluetooth", CAT, title, INFO, "Bluetooth is turned off", evidence=ev,
+                       guidance=["Turn it on in your desktop's Bluetooth settings, and check that airplane mode "
+                                 "is off."])
+    if not adapters:
+        return finding("hardware.bluetooth", CAT, title, WARN,
+                       "A Bluetooth switch exists but no adapter is active", evidence=ev,
+                       guidance=["The adapter's driver may not have loaded. `journalctl -b -k` shows the "
+                                 "kernel's messages about it; that command only reads."])
+    return finding("hardware.bluetooth", CAT, title, PASS, "Bluetooth adapter present and on", evidence=ev)
+
+
+@probe("hardware.capture", CAT, "Microphone & camera")
+def capture(ctx):
+    """Which microphone inputs and cameras the kernel sees. Read from /proc and /sys; nothing is recorded."""
+    title = "Microphone & camera"
+    inputs = [line.split(":", 2)[1].strip() for line in (ctx.try_text("/proc/asound/pcm", 64 * 1024) or "").splitlines()
+              if "capture" in line and line.count(":") >= 2]
+    cameras = []
+    for name in sorted(ctx.listdir("/sys/class/video4linux")):
+        label = (ctx.try_text(f"/sys/class/video4linux/{name}/name", 128) or "").strip()
+        if re.fullmatch(r"video\d+", name) and label and label not in cameras:
+            cameras.append(label)
+    ev = [f"microphone input: {name}" for name in inputs[:8]] + [f"camera: {name}" for name in cameras[:8]]
+    if not inputs and not cameras:
+        return finding("hardware.capture", CAT, title, INFO, "No microphone or camera found",
+                       guidance=["A USB or Bluetooth device appears here once it is plugged in or connected. "
+                                 "Some laptops have a key or a shutter that disconnects the camera."])
+    mics = f"{len(inputs)} microphone input{'' if len(inputs) == 1 else 's'}" if inputs else "no microphone"
+    cams = f"{len(cameras)} camera{'' if len(cameras) == 1 else 's'}" if cameras else "no camera"
+    return finding("hardware.capture", CAT, title, PASS, f"{mics}, {cams}".capitalize(), evidence=ev)

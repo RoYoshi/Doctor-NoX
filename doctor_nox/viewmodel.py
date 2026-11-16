@@ -6,7 +6,9 @@ this module lays it out.
 """
 from __future__ import annotations
 
+import datetime
 import html
+import re
 
 from . import clinic
 from .clinic import count_summary  # noqa: F401  (part of this module's interface)
@@ -105,7 +107,7 @@ def duration_text(ms):
 
 def empty_state(report, scanning, category, query, severities, symptom=clinic.GENERAL):
     if scanning and not report:
-        return "Examining… I'll have the findings when every test has finished."
+        return "Examining… findings appear when every test has finished."
     if not report:
         return "No checkup yet.\nPress Start checkup (F5). I only look: nothing on this PC is changed."
     if not visible(report, category, query, severities, symptom):
@@ -141,10 +143,33 @@ def _callout(severity, body_html, theme):
             f'<tr><td style="background-color:{s.bg};color:{theme.text}">{body_html}</td></tr></table>')
 
 
-def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace", change=None):
-    """One test's result. change is its entry in clinic.follow_up()'s changes, when it has one."""
+LINK = "doctor:"  # the diagnosis pane's own links: copy:<n>, recheck, open, help (handled by the window)
+
+
+def _treatment(finding, theme, mono):
+    """The treatment's steps. A command Doctor NoX knows gets its own line: the command, a link
+    that copies it, and what it does."""
+    known = clinic.commands(finding)
+    items = []
+    for step in finding["guidance"]:
+        extra = ""
+        for command in dict.fromkeys(c for c in re.findall(r"`([^`]+)`", step) if c in known):
+            extra += (f'<br><span style="font-family:\'{_e(mono)}\';color:{theme.text}">{_e(command)}</span>'
+                      f'&nbsp;&nbsp;<a href="{LINK}copy:{known.index(command)}">Copy</a>'
+                      f'<br><span style="color:{theme.muted}">{_e(clinic.explain(command))}</span>')
+        items.append(f'<li style="margin-bottom:6px">{_e(step)}{extra}</li>')
+    return f'<ul style="color:{theme.text};margin-top:0">' + "".join(items) + "</ul>"
+
+
+def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace", change=None, actions=None):
+    """One test's result. change is its entry in clinic.follow_up()'s changes, when it has one.
+
+    actions says what the window can do for this test: {"recheck": True} offers "Check this
+    again", {"referral": label} offers the desktop's own tool, {"rechecked": text} reports a re-check.
+    """
     t = theme
     sev = finding["severity"]
+    actions = actions or {}
     parts = [
         f'<p style="color:{t.muted};margin-bottom:2px">{_e(CATEGORY_TITLE[finding["category"]])}</p>',
         f'<h2 style="color:{t.text};margin-top:0;margin-bottom:8px;font-weight:600">{_e(finding["title"])}</h2>',
@@ -152,6 +177,8 @@ def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace", change=Non
          f'<span style="color:{t.text}">{_e(finding["summary"])}</span></p>'),
         f'<p style="color:{t.muted};margin-top:2px">{_e(STATUS_MEANING[sev])}</p>',
     ]
+    if actions.get("rechecked"):
+        parts.append(f'<p style="color:{t.text}">{_e(actions["rechecked"])}</p>')
     if change and clinic.CHANGE_TEXT.get(change[0]):
         parts.append(f'<p style="color:{t.text}">{_e(clinic.CHANGE_TEXT[change[0]])} since your last checkup: '
                      f'it was {_e(STATUS_TEXT[change[1]])}.</p>')
@@ -165,13 +192,18 @@ def detail_html(finding, theme: Theme = DARK_THEME, mono="monospace", change=Non
                        f'<pre style="font-family:\'{_e(mono)}\';color:{t.text};margin:0">'
                      + _e("\n".join(finding["evidence"])) + "</pre></td></tr></table>")
     if finding["guidance"]:
-        parts.append(_section("Treatment", t)
-                     + f'<ul style="color:{t.text};margin-top:0">'
-                     + "".join(f'<li style="margin-bottom:4px">{_e(g)}</li>' for g in finding["guidance"]) + "</ul>"
-                     f'<p style="color:{t.muted}">I only prescribe: Doctor NoX never carries out these steps '
-                     f'for you.</p>')
+        parts.append(_section("Treatment", t) + _treatment(finding, t, mono)
+                     + f'<p style="color:{t.muted}">I only prescribe: Doctor NoX never carries out these steps '
+                       f'for you.</p>')
     elif sev == PASS:
         parts.append(_section("Treatment", t) + f'<p style="color:{t.text};margin-top:0">None needed.</p>')
+    links = []
+    if actions.get("referral"):
+        links.append(f'<a href="{LINK}open">{_e(actions["referral"])}</a>')
+    if actions.get("recheck"):
+        links.append(f'<a href="{LINK}recheck">Check this again</a>')
+    if links:
+        parts.append('<p style="margin-top:10px">' + "&nbsp;&nbsp;·&nbsp;&nbsp;".join(links) + "</p>")
     # The test's ID, for reports and bug reports; last, because it is reference, not reading.
     parts.append(f'<p style="color:{t.muted};margin-top:16px">Test ID&nbsp; '
                  f'<span style="font-family:\'{_e(mono)}\'">{_e(finding["id"])}</span></p>')
@@ -196,20 +228,46 @@ def _said(sentences, theme):
             + "".join(f'<p style="color:{theme.text};margin-top:0;margin-bottom:4px">{_e(line)}</p>' for line in rest))
 
 
-def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None, symptom=clinic.GENERAL, now=None):
-    """The diagnosis pane: what the doctor says, the follow-up, then the areas.
+def chart_html(history, theme: Theme = DARK_THEME):
+    """Your chart: one mark per checkup on record, oldest on the left, and the same in words."""
+    t = theme
+    if len(history) < 2:
+        return ""
+    cells = "".join(f'<td width="10" style="background-color:{t.status[e["overall"]].fg}">&nbsp;</td>'
+                    f'<td width="3"></td>' for e in history)
+    counts = {}
+    for entry in history:
+        counts[HEADLINE[entry["overall"]]] = counts.get(HEADLINE[entry["overall"]], 0) + 1
+    said = ", ".join(f"{n} {name.lower()}" for name, n in counts.items())
+    try:
+        first = datetime.datetime.fromisoformat(history[0]["generated_at"]).astimezone()
+        since = f" since {first.day} {first:%b %Y}"
+    except ValueError:
+        since = ""
+    return (_section("Your chart", t)
+            + f'<table cellspacing="0" cellpadding="0"><tr>{cells}</tr></table>'
+            + f'<p style="color:{t.muted};margin-top:4px">{len(history)} checkups{since}, oldest on the left: '
+              f'{_e(said)}.</p>')
+
+
+def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None, symptom=clinic.GENERAL, now=None,
+                  skipped_areas=(), history=(), help_place=None):
+    """The diagnosis pane: what the doctor says, the follow-up, the outlook, then the areas.
 
     follow is clinic.follow_up()'s result (None: no earlier checkup to compare with).
+    skipped_areas are the area keys your settings leave out of a checkup.
+    history is the chart of checkups on record, oldest first; the outlook is given only when its last
+    entry is this checkup. help_place, when not None, adds "Get help" and names where it leads
+    ("" when only the note can be copied).
     """
     t = theme
     if not report:
-        lead = ("Examining… I'll have the findings when every test has finished." if scanning
-                else "Press <b>Start checkup</b> (F5).")
+        lead = ("Examining… findings appear when every test has finished." if scanning
+                else "Press <b>Start checkup</b> (F5), or tell me what's wrong.")
         return (f'<h2 style="color:{t.text};font-weight:600">{_e(clinic.MOTTO)}</h2>'
-                f'<p style="color:{t.muted}">I examine updates and packages, security, services, drivers, '
-                f'controllers, storage, apps, network and logs on any Linux. I only look and prescribe: I need no '
-                f'root, change nothing on your system and send nothing anywhere. To follow up next time, I keep '
-                f'one small note of my own: the conditions found at your last checkup.</p>'
+                f'<p style="color:{t.muted}">I examine updates, security, drivers, storage, apps, the network '
+                f'and logs on any Linux, then give you the diagnosis and the treatment. I only look: no root, '
+                f'no changes to your system, nothing sent anywhere.</p>'
                 f'<p style="color:{t.text}">{lead}</p>' + _legend(t))
     tot = report["totals"]
     state = report["overall"]
@@ -228,6 +286,18 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None
     followed = (_section("Since your last checkup", t)
                 + "".join(f'<p style="color:{t.text};margin-top:0;margin-bottom:4px">{_e(line)}</p>' for line in since)
                 ) if since else ""
+    history = list(history)
+    current = bool(history) and history[-1]["generated_at"] == report["generated_at"]
+    ahead = clinic.prognosis(history) if current else []
+    outlook = (_section("Prognosis", t)
+               + "".join(f'<p style="color:{t.text};margin-top:0;margin-bottom:4px">{_e(line)}</p>' for line in ahead)
+               ) if ahead else ""
+    get_help = ""
+    if help_place is not None:
+        where = (f"copies the doctor's note and opens {_e(help_place)}" if help_place
+                 else "copies the doctor's note, to share where you ask for help")
+        get_help = (f'<p style="color:{t.muted};margin-top:12px">Still stuck? '
+                    f'<a href="{LINK}help">Get help</a> {where}.</p>')
     skipped = report.get("not_applicable") or []
     not_here = ""
     if skipped:
@@ -237,12 +307,17 @@ def overview_html(report, scanning=False, theme: Theme = DARK_THEME, follow=None
                         f'<tr><td style="color:{t.text};padding:2px 16px 2px 0">{_e(item["title"])}</td>'
                         f'<td style="color:{t.muted};padding:2px 0">only on {_e(item["applies_to"])}</td></tr>'
                         for item in skipped) + "</table>")
+    left_out = [CATEGORY_TITLE[key] for key in skipped_areas if key in CATEGORY_TITLE]
+    if left_out:
+        not_here = (_section("Left out by your settings", t)
+                    + f'<p style="color:{t.muted};margin-top:0">{_e(", ".join(left_out))}. '
+                      f'Turn them back on under Menu → Settings.</p>') + not_here
     return (_section("Diagnosis", t).replace("margin-top:16px", "margin-top:0")
             + f'<h2 style="color:{t.status[state].fg};margin-top:0;font-weight:600">{_e(HEADLINE[state])}</h2>'
             + _said(clinic.verdict(report, symptom), t)
             + f'<p style="color:{t.muted}">{_e(count_summary(tot))}<br>'
               f'A checkup shows this moment; it is not a score.</p>'
-            + incomplete + followed
+            + incomplete + followed + outlook + chart_html(history, t) + get_help
             + _section("Areas examined", t) + '<table cellspacing="0">' + "".join(rows) + "</table>"
             + f'<p style="color:{t.muted};margin-top:12px">Select a test to see what I found and the treatment.</p>'
             + not_here + _legend(t))

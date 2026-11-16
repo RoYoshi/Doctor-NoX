@@ -12,22 +12,26 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import traceback
 
-from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDatabase, QFontMetrics,
+from PySide6.QtCore import (QEasingCurve, QEvent, QPointF, QProcess, QPropertyAnimation, QRect, QRectF, QSize,
+                            QStandardPaths, Qt, QThread, QTimer, QUrl, Signal, Slot)
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics,
                            QGuiApplication, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPalette,
                            QPen, QPixmap, QPolygonF, QShortcut)
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QStyle,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QDialog, QDialogButtonBox,
+                               QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar,
+                               QPushButton, QRadioButton, QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTextBrowser, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_ID, VERSION
-from . import clinic, engine, record, report as reports, theme as themes, viewmodel as vm
+from . import (clinic, engine, record, referral, report as reports, settings as settings_store, theme as themes,
+               viewmodel as vm)
 from .context import Context
-from .model import CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
+from .model import CATEGORIES, CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
 from .theme import STATUS_TEXT, Theme
 
 # Doctor's own identity (the NoX icon), independent of any distribution logo.
@@ -38,8 +42,10 @@ SEV_ROLE = Qt.ItemDataRole.UserRole + 1         # results table: severity key of
 NAV_BADGE_ROLE = Qt.ItemDataRole.UserRole + 2   # sidebar: pill text ("3", "OK", "")
 NAV_SEV_ROLE = Qt.ItemDataRole.UserRole + 3     # sidebar: pill severity ("" for none)
 CHANGE_COLUMN = 4                               # results table: "Since last checkup"
-SUBTITLE = "A doctor for your PC: it examines and prescribes, and never operates"
-SAFETY_NOTE = "Examines only: needs no root, makes no network requests, uploads nothing, changes nothing"
+ENV_FRAME = "DOCTOR_NOX_FRAME"                  # own | system: overrides the title bar setting (a way back)
+SWEEP_SECONDS = 1.6                             # the heart monitor: one pass across the strip
+SUBTITLE = "A doctor for your PC. Examines and prescribes; never operates."
+SAFETY_NOTE = "Examines only · no root · no network requests · nothing uploaded or changed"
 QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (stylesheet parse errors fail the test)
 
 
@@ -174,12 +180,19 @@ def build_palette(t: Theme) -> QPalette:
     return palette
 
 
-def stylesheet(t: Theme) -> str:
+def stylesheet(t: Theme, own_frame: bool = False) -> str:
     chips = "".join(
         f"""QToolButton[sev="{sev}"]:checked {{ background: {s.bg}; color: {s.fg}; border-color: {s.border}; }}
     """ for sev, s in t.status.items())
+    edge = f"QWidget#host {{ border: 1px solid {t.border_strong}; }}" if own_frame else ""
     return f"""
     QMainWindow, QWidget#host {{ background: {t.window}; }}
+    {edge}
+    QFrame#titlebar {{ background: {t.surface}; border-bottom: 1px solid {t.border}; }}
+    QToolButton[windowButton="true"] {{ background: transparent; border: none; border-radius: 6px;
+                 padding: 6px 8px; }}
+    QToolButton[windowButton="true"]:hover {{ background: {t.hover}; }}
+    QToolButton[windowButton="true"]:pressed {{ background: {t.border}; }}
     QWidget {{ color: {t.text}; }}
     QLabel#subtitle, QLabel#snapshot, QLabel#safety, QLabel#section {{ color: {t.muted}; }}
     QLabel#verdict {{ border-radius: 13px; padding: 4px 14px; font-weight: 600; }}
@@ -275,11 +288,35 @@ def paint_pill(painter: QPainter, rect: QRectF, text: str, font: QFont, status) 
     painter.restore()
 
 
-def dot_icon(on_colour: str, off_colour: str) -> QIcon:
+def window_icon(kind: str, colour: str, ratio: float = 1.0) -> QIcon:
+    """The title bar's own buttons, drawn rather than taken from a font or a theme: a line
+    (minimize), a square (maximize) or a cross (close), sharp at any screen scale."""
+    pix = QPixmap(round(12 * ratio), round(12 * ratio))
+    pix.setDevicePixelRatio(ratio)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    pen = QPen(QColor(colour), 1.3)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "minimize":
+        painter.drawLine(QPointF(2.5, 9.5), QPointF(9.5, 9.5))
+    elif kind == "maximize":
+        painter.drawRect(QRectF(2.5, 2.5, 7, 7))
+    else:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.drawLine(QPointF(2.5, 2.5), QPointF(9.5, 9.5))
+        painter.drawLine(QPointF(9.5, 2.5), QPointF(2.5, 9.5))
+    painter.end()
+    return QIcon(pix)
+
+
+def dot_icon(on_colour: str, off_colour: str, ratio: float = 1.0) -> QIcon:
     """Status dot for the filter chips: coloured when shown, grey when filtered out."""
     icon = QIcon()
     for colour, state in ((on_colour, QIcon.State.On), (off_colour, QIcon.State.Off)):
-        pix = QPixmap(12, 12)
+        pix = QPixmap(round(12 * ratio), round(12 * ratio))
+        pix.setDevicePixelRatio(ratio)
         pix.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -384,7 +421,7 @@ class VitalTile(QFrame):
     """
     clicked = Signal(str)
 
-    def __init__(self, label: str, parent=None):
+    def __init__(self, label: str, mono: str = "", parent=None):
         super().__init__(parent, objectName="vital")
         self.label = label
         self.finding_id = ""
@@ -395,7 +432,10 @@ class VitalTile(QFrame):
         self.caption = QLabel(label, objectName="vitalLabel")
         self.caption.setFont(scaled_font(self.font(), 0.92))
         self.value = QLabel(self.reading)
-        self.value.setFont(scaled_font(self.font(), 1.1, QFont.Weight.DemiBold))
+        reading_font = scaled_font(self.font(), 1.1, QFont.Weight.DemiBold)
+        if mono:
+            reading_font.setFamily(mono)  # figures line up, as on a bedside monitor
+        self.value.setFont(reading_font)
         # The reading may be clipped, never a reason for the window to grow.
         self.value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.value.setMinimumWidth(40)
@@ -429,6 +469,228 @@ class VitalTile(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class PulseLine(QWidget):
+    """The heart monitor in the header: an ECG trace in the overall condition's colour.
+
+    While a checkup runs, a bright head sweeps along it as on a bedside monitor; otherwise it is
+    still. It is decoration: the condition is always written beside it. Paint errors never crash
+    the window; they are recorded like the delegates' (the self-test asserts there are none).
+    """
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self.colour = ""
+        self.running = False
+        self.motion = True
+        self.phase = 0.0
+        self.settling = False   # one last sweep in the condition's colour after a checkup ends
+        self._since = 0.0
+        self.timer = QTimer(self)
+        self.timer.setInterval(16)  # about 60 frames a second; the phase follows the clock, not the ticks
+        self.timer.timeout.connect(self._tick)
+        self.setMinimumSize(60, 34)
+        self.setMaximumHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAccessibleName("Heart monitor")
+
+    def sizeHint(self):
+        return QSize(240, 36)
+
+    def set_state(self, colour: str, running: bool, motion: bool):
+        ended = self.running and not running
+        self.colour, self.running, self.motion = colour, running, motion
+        if running and motion:
+            self.settling = False
+            if not self.timer.isActive():
+                self._since = time.monotonic()
+                self.timer.start()
+        elif ended and motion:
+            self.settling, self._since, self.phase = True, time.monotonic(), 0.0
+            self.timer.start()
+        elif not self.settling or not motion:
+            self.settling = False
+            self.timer.stop()
+            self.phase = 0.0
+        self.setAccessibleDescription("Examining" if running else "At rest")
+        self.update()
+
+    def _tick(self):
+        passed = (time.monotonic() - self._since) / SWEEP_SECONDS
+        if self.settling and passed >= 1.0:
+            self.settling = False
+            self.timer.stop()
+            self.phase = 0.0
+        else:
+            self.phase = passed % 1.0
+        self.update()
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        try:
+            points = clinic.pulse(self.width(), self.height())
+            if len(points) < 2 or not self.colour:
+                return
+            path = QPainterPath(QPointF(*points[0]))
+            for x, y in points[1:]:
+                path.lineTo(x, y)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            colour = QColor(self.colour)
+            pen = QPen(colour, 1.6)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            if not ((self.running or self.settling) and self.motion):
+                painter.setPen(pen)
+                painter.drawPath(path)
+                return
+            head = self.phase * self.width()
+            faint = QColor(colour)
+            faint.setAlphaF(0.28)
+            old = QPen(pen)
+            old.setColor(faint)
+            painter.setClipRect(QRectF(head + 18, 0, self.width(), self.height()))  # the last sweep, fading
+            painter.setPen(old)
+            painter.drawPath(path)
+            painter.setClipRect(QRectF(0, 0, head, self.height()))                  # this sweep
+            painter.setPen(pen)
+            painter.drawPath(path)
+            painter.setClipping(False)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(colour))
+            painter.drawEllipse(QPointF(head, clinic.pulse_y(points, head)), 2.4, 2.4)
+        except Exception:
+            self._window.paint_errors.append(traceback.format_exc())
+            print(f"Doctor NoX: paint error\n{self._window.paint_errors[-1]}", file=sys.stderr, flush=True)
+        finally:
+            painter.end()
+
+
+class TitleBar(QFrame):
+    """The window's header, which is also its title bar when Doctor NoX draws its own frame:
+    drag it to move the window, double-click it to maximize."""
+
+    def __init__(self, window):
+        super().__init__(window, objectName="titlebar")
+        self._window = window
+
+    def mousePressEvent(self, event):
+        handle = self._window.windowHandle()
+        if self._window.own_frame and event.button() == Qt.MouseButton.LeftButton and handle is not None:
+            handle.startSystemMove()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._window.own_frame and event.button() == Qt.MouseButton.LeftButton:
+            self._window.toggle_maximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class SettingsDialog(QDialog):
+    """Your settings. Nothing changes until OK; Cancel leaves everything as it was."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self.setWindowTitle("Doctor NoX settings")
+        self.setModal(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(8)
+
+        def heading(text):
+            label = QLabel(text)
+            label.setFont(scaled_font(self.font(), 1.05, QFont.Weight.DemiBold))
+            layout.addSpacing(6)
+            layout.addWidget(label)
+
+        def hint(text):
+            label = QLabel(text, objectName="subtitle", wordWrap=True)
+            layout.addWidget(label)
+
+        heading("Appearance")
+        row = QHBoxLayout()
+        self.theme_buttons = {}
+        group = QButtonGroup(self)
+        for mode in themes.MODES:
+            button = QRadioButton(themes.MODE_LABEL[mode])
+            group.addButton(button)
+            row.addWidget(button)
+            self.theme_buttons[mode] = button
+        row.addStretch(1)
+        layout.addLayout(row)
+        hint("Match system follows your desktop's light or dark setting, and switches when it does.")
+        if window.theme_locked:
+            hint(f"{themes.ENV_MODE} is set in the environment, so it decides the theme until it is removed.")
+        self.motion = QCheckBox("Animate the heart monitor during a checkup")
+        layout.addWidget(self.motion)
+        self.own_frame = QCheckBox("Use Doctor NoX's own title bar instead of the desktop's window frame")
+        layout.addWidget(self.own_frame)
+        hint("Applies the next time Doctor NoX opens. With its own title bar: drag the header to move, "
+             "double-click it to maximize, and resize from the bottom-right corner.")
+
+        heading("Checkups")
+        self.at_launch = QCheckBox("Start a checkup when Doctor NoX opens")
+        layout.addWidget(self.at_launch)
+        self.remember = QCheckBox("Remember my checkups (the last 30), for follow-ups and a prognosis")
+        layout.addWidget(self.remember)
+        hint("Turning this off deletes them.")
+        limit = QHBoxLayout()
+        limit.addWidget(QLabel("Stop a checkup after"))
+        self.deadline = QSpinBox()
+        self.deadline.setRange(*settings_store.DEADLINE_RANGE)
+        self.deadline.setSuffix(" seconds")
+        self.deadline.setAccessibleName("Stop a checkup after this many seconds")
+        limit.addWidget(self.deadline)
+        limit.addStretch(1)
+        layout.addLayout(limit)
+
+        heading("Areas to examine")
+        grid = QGridLayout()
+        self.area_boxes = {}
+        for i, (key, title) in enumerate(CATEGORIES):
+            box = QCheckBox(title)
+            grid.addWidget(box, i // 2, i % 2)
+            self.area_boxes[key] = box
+        layout.addLayout(grid)
+        hint("An area you turn off is left out of every checkup. With all of them off, all are examined.")
+
+        layout.addSpacing(8)
+        standard = QDialogButtonBox.StandardButton
+        buttons = QDialogButtonBox(standard.Ok | standard.Cancel | standard.RestoreDefaults)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(standard.RestoreDefaults).clicked.connect(self.restore_defaults)
+        layout.addWidget(buttons)
+        self.set_values(window.settings)
+
+    def restore_defaults(self):
+        self.set_values(settings_store.clean(None))
+
+    def set_values(self, values: dict):
+        values = settings_store.clean(values)
+        for mode, button in self.theme_buttons.items():
+            button.setChecked(mode == values["theme"])
+        self.motion.setChecked(values["monitor_motion"])
+        self.own_frame.setChecked(values["own_frame"])
+        self.at_launch.setChecked(values["checkup_at_launch"])
+        self.remember.setChecked(values["remember"])
+        self.deadline.setValue(values["deadline"])
+        for key, box in self.area_boxes.items():
+            box.setChecked(key not in values["skip_areas"])
+
+    def values(self) -> dict:
+        theme = next((mode for mode, button in self.theme_buttons.items() if button.isChecked()), themes.SYSTEM)
+        return settings_store.clean({
+            "theme": theme, "monitor_motion": self.motion.isChecked(), "own_frame": self.own_frame.isChecked(),
+            "checkup_at_launch": self.at_launch.isChecked(), "remember": self.remember.isChecked(),
+            "deadline": self.deadline.value(),
+            "skip_areas": [key for key, box in self.area_boxes.items() if not box.isChecked()]})
+
+
 class ScanThread(QThread):
     """Runs engine.scan off the GUI thread.
 
@@ -443,10 +705,11 @@ class ScanThread(QThread):
     failed = Signal(str, int)
     done = Signal(int)  # always the last thing run() does, after completed/failed
 
-    def __init__(self, generation: int, scan_func, context_factory, parent=None):
+    def __init__(self, generation: int, scan_func, context_factory, parent=None, options=None):
         super().__init__(parent)
         self.generation = generation
         self._scan = scan_func
+        self._options = dict(options or {})  # areas and time limit from your settings; {} for the defaults
         self.ctx = context_factory()
 
     def cancel(self):
@@ -455,7 +718,7 @@ class ScanThread(QThread):
     def run(self):
         try:
             # This callback runs on the scan thread; it only emits (thread-safe), never touches widgets.
-            result = self._scan(self.ctx, progress=self._emit_progress)
+            result = self._scan(self.ctx, progress=self._emit_progress, **self._options)
             self.completed.emit(result, self.generation)
         except Exception as exc:  # surfaced in the UI, never a crash
             self.failed.emit(f"{type(exc).__name__}: {exc}", self.generation)
@@ -469,12 +732,23 @@ class ScanThread(QThread):
 # ── window ───────────────────────────────────────────────────────────────────
 class Window(QMainWindow):
     def __init__(self, *, scan_func=engine.scan, context_factory=Context, autoscan=True, interactive=True,
-                 record_path=None):
+                 record_path=None, settings_path=None, probe_ids=None, which=None, environ=None):
         super().__init__()
-        self.interactive = interactive        # False in self-tests: never open modal dialogs
+        self.interactive = interactive        # False in self-tests: no modal dialogs, nothing opened or copied
+        self._probe_ids = probe_ids           # the tests that can be run again alone (None: the real ones)
+        self._which, self._environ = which, environ  # for referrals; None: the real PATH and environment
+        self._partial = ""                    # the test being checked again, while that runs
+        self.rechecked: dict[str, str] = {}   # test ID: what its re-check found, for the details pane
+        self.last_copied = ""                 # what "Copy" last copied
+        self.last_opened: tuple = ()          # the referral or address last opened (kept in self-tests)
+        # Your settings (None: the defaults, and nothing is written).
+        self.settings_path = settings_path
+        self.settings = settings_store.load(settings_path)
+        self.report_skipped: list[str] = []   # areas left out of the checkup on screen
+        self._starting_skipped: list[str] = []
         # Follow-ups: where the last checkup is remembered (None: nowhere, nothing is written).
-        self.record_path = record_path
-        self.remembered = record.load(record_path)  # the checkup the next one is compared with
+        self.record_file = record_path
+        self.history = record.load(self.record_path)  # your chart, oldest first; the last one is compared with
         self.follow = None                    # clinic.follow_up() for the report on screen
         self.symptom = clinic.GENERAL         # "What's wrong?"
         self.workers: dict[int, ScanThread] = {}  # every thread not yet joined, by generation
@@ -494,7 +768,14 @@ class Window(QMainWindow):
         self.selected_id = ""
         # The desktop's palette before Doctor applies its own; used to follow the system scheme.
         self._system_palette = QPalette(QGuiApplication.palette())
-        self.theme_mode = themes.requested_mode()
+        # DOCTOR_NOX_THEME, when set, decides the theme; otherwise your setting does.
+        frame = os.environ.get(ENV_FRAME, "").strip().lower()
+        self.own_frame = frame == "own" if frame in ("own", "system") else self.settings["own_frame"]
+        if self.own_frame:
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        asked = os.environ.get(themes.ENV_MODE, "").strip().lower()
+        self.theme_locked = asked in themes.MODES
+        self.theme_mode = asked if self.theme_locked else self.settings["theme"]
         self.theme: Theme = themes.resolve(self.theme_mode, system_prefers_dark(self._system_palette))
         self.mono = mono_family()
         self.pill_width = 0
@@ -509,22 +790,34 @@ class Window(QMainWindow):
         if hasattr(hints, "colorSchemeChanged"):
             hints.colorSchemeChanged.connect(self._system_scheme_changed)
         self.apply_theme()
-        if autoscan:
+        if autoscan and self.settings["checkup_at_launch"]:
             QTimer.singleShot(0, self.start_scan)
+
+    @property
+    def record_path(self):
+        """Where the last checkup is remembered, or None when that is off."""
+        return self.record_file if self.settings["remember"] else None
 
     # layout ------------------------------------------------------------------
     def _build(self):
         host = QWidget(objectName="host")
         self.setCentralWidget(host)
-        root = QVBoxLayout(host)
-        root.setContentsMargins(18, 14, 18, 12)
+        outer = QVBoxLayout(host)
+        outer.setContentsMargins(1, 1, 1, 0) if self.own_frame else outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.titlebar = TitleBar(self)
+        outer.addWidget(self.titlebar)
+        root = QVBoxLayout()
+        root.setContentsMargins(18, 12, 18, 12)
         root.setSpacing(12)
+        outer.addLayout(root, 1)
 
         # Header: identity on the left, overall state on the right.
-        head = QHBoxLayout()
+        head = QHBoxLayout(self.titlebar)
+        head.setContentsMargins(18, 10, 10 if self.own_frame else 18, 10)
         head.setSpacing(12)
         logo = QLabel()
-        logo.setPixmap(app_icon().pixmap(40, 40))
+        logo.setPixmap(app_icon().pixmap(QSize(40, 40), self.devicePixelRatioF()))
         logo.setAccessibleName("Doctor NoX icon")
         head.addWidget(logo)
         titles = QVBoxLayout()
@@ -536,7 +829,8 @@ class Window(QMainWindow):
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
         head.addLayout(titles)
-        head.addStretch(1)
+        self.pulse = PulseLine(self)
+        head.addWidget(self.pulse, 1)
         right = QVBoxLayout()
         right.setSpacing(4)
         self.verdict = QLabel("—", objectName="verdict", alignment=Qt.AlignmentFlag.AlignCenter)
@@ -545,16 +839,40 @@ class Window(QMainWindow):
         right.addWidget(self.verdict, 0, Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.snapshot, 0, Qt.AlignmentFlag.AlignRight)
         head.addLayout(right)
-        root.addLayout(head)
+        # Its own window buttons, when Doctor NoX draws its own frame.
+        self.window_buttons = {}
+        controls = QHBoxLayout()
+        controls.setSpacing(2)
+        for kind, name, slot in (("minimize", "Minimize", self.showMinimized),
+                                 ("maximize", "Maximize or restore", self.toggle_maximized),
+                                 ("close", "Close", self.close)):
+            button = QToolButton()
+            button.setProperty("windowButton", True)
+            button.setIconSize(QSize(12, 12))
+            button.setToolTip(name)
+            button.setAccessibleName(name)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # the desktop's own shortcuts cover these
+            button.clicked.connect(slot)
+            button.setVisible(self.own_frame)
+            self.window_buttons[kind] = button
+            controls.addWidget(button)
+        head.addLayout(controls)
 
         # The consultation: what's wrong on the left, the checkup and its paperwork on the right.
         consult = QHBoxLayout()
         consult.setSpacing(8)
+        self.complaint = QLineEdit(placeholderText="What's wrong? Type it (“no sound”, “wifi keeps dropping”) "
+                                                   "and press Enter")
+        self.complaint.setClearButtonEnabled(True)
+        self.complaint.setMinimumWidth(200)
+        self.complaint.setAccessibleName("What's wrong? Type it in your own words")
+        self.complaint.returnPressed.connect(self.describe)
+        consult.addWidget(self.complaint, 1)
         self.symptom_btn = QToolButton(objectName="menuButton")
         self.symptom_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.symptom_btn.setToolTip("Tell the doctor what's wrong: the tests that bear on it are shown, "
+        self.symptom_btn.setToolTip("Or pick what's wrong: the tests that bear on it are shown, "
                                     "and the verdict speaks to it")
-        self.symptom_btn.setAccessibleName("What's wrong?")
+        self.symptom_btn.setAccessibleName("Pick what's wrong")
         complaints = QMenu(self.symptom_btn)
         complaint_group = QActionGroup(complaints)
         complaint_group.setExclusive(True)
@@ -567,11 +885,13 @@ class Window(QMainWindow):
             self.symptom_actions[symptom.key] = act
         self.symptom_btn.setMenu(complaints)
         consult.addWidget(self.symptom_btn)
-        consult.addStretch(1)
         self.progress = QProgressBar(maximumWidth=140, visible=False)
         self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
         self.progress.setAccessibleName("Checkup progress")
+        self.progress_glide = QPropertyAnimation(self.progress, b"value", self)  # the bar fills, never jumps
+        self.progress_glide.setDuration(220)
+        self.progress_glide.setEasingCurve(QEasingCurve.Type.OutCubic)
         consult.addWidget(self.progress)
         self.cancel_btn = QPushButton("Cancel", visible=False)
         self.cancel_btn.setToolTip("Stop the checkup (Esc)")
@@ -605,11 +925,14 @@ class Window(QMainWindow):
         self.export_btn.setMenu(menu)
         self.export_btn.setAccessibleName("Export report")
         consult.addWidget(self.export_btn)
-        self.more_btn = QToolButton(text="View", objectName="menuButton")
+        self.more_btn = QToolButton(text="Menu", objectName="menuButton")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.more_btn.setToolTip("Appearance and information about Doctor NoX")
-        self.more_btn.setAccessibleName("View options")
+        self.more_btn.setToolTip("Settings, appearance and information about Doctor NoX")
+        self.more_btn.setAccessibleName("Menu")
         more = QMenu(self.more_btn)
+        preferences = QAction("Settings…", more)
+        preferences.triggered.connect(self.open_settings)
+        more.addAction(preferences)
         appearance = more.addMenu("Appearance")
         group = QActionGroup(appearance)
         group.setExclusive(True)
@@ -633,7 +956,7 @@ class Window(QMainWindow):
         vital_row.setSpacing(8)
         self.vital_tiles = {}
         for vital in clinic.vitals(None):
-            tile = VitalTile(vital["label"])
+            tile = VitalTile(vital["label"], self.mono)
             tile.clicked.connect(self.open_finding)
             self.vital_tiles[vital["key"]] = tile
             vital_row.addWidget(tile, 1)
@@ -679,6 +1002,7 @@ class Window(QMainWindow):
         self.nav.setAccessibleName("Areas examined")
         self.nav.setMinimumWidth(190)
         self.nav.setUniformItemSizes(True)
+        self.nav.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.nav_delegate = NavDelegate(self)
         self.nav.setItemDelegate(self.nav_delegate)
         self.nav.currentItemChanged.connect(self._category_changed)
@@ -697,6 +1021,7 @@ class Window(QMainWindow):
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setAccessibleName("Findings")
+        self.tree.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)  # glides, not row jumps
         self.status_delegate = StatusDelegate(self)
         self.tree.setItemDelegateForColumn(0, self.status_delegate)
         hdr = self.tree.header()
@@ -725,6 +1050,7 @@ class Window(QMainWindow):
         self.inner.addWidget(self.stack)
         self.details = QTextBrowser(objectName="details")
         self.details.setOpenLinks(False)
+        self.details.anchorClicked.connect(self._detail_link)
         self.details.setAccessibleName("Diagnosis and treatment")
         self.details.document().setDocumentMargin(16)
         self.inner.addWidget(self.details)
@@ -739,13 +1065,44 @@ class Window(QMainWindow):
         self.safety.setAccessibleName("Doctor NoX only examines: it needs no root, makes no network requests, "
                                       "uploads nothing and changes nothing on your system")
         self.statusBar().addPermanentWidget(self.safety)
-        self.statusBar().setSizeGripEnabled(False)
-        self.statusBar().showMessage(clinic.MOTTO)
+        self.statusBar().setSizeGripEnabled(self.own_frame)  # its own frame has no edges to drag
+        self.statusBar().showMessage(clinic.greeting(datetime.datetime.now().hour))
 
     # theme -------------------------------------------------------------------
     def set_theme_mode(self, mode: str):
         self.theme_mode = mode if mode in themes.MODES else themes.SYSTEM
+        if self.settings["theme"] != self.theme_mode:
+            self.settings["theme"] = self.theme_mode
+            settings_store.save(self.settings_path, self.settings)
         self.apply_theme()
+
+    def open_settings(self):
+        """The settings dialog. In self-tests it is returned unopened, to be driven without a modal loop."""
+        dialog = SettingsDialog(self)
+        if not self.interactive:
+            return dialog
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.apply_settings(dialog.values())
+        dialog.deleteLater()
+        return None
+
+    def apply_settings(self, values: dict):
+        was, new = self.settings, settings_store.clean(values)
+        self.settings = new
+        saved = settings_store.save(self.settings_path, new)
+        if was["remember"] and not new["remember"]:
+            record.forget(self.record_file)
+            self.history, self.follow = [], None
+        elif new["remember"] and not was["remember"] and self.report and record.save(self.record_path, self.report):
+            self.history = record.load(self.record_path)
+        if not self.theme_locked:
+            self.theme_mode = new["theme"]
+        self.apply_theme()  # renders everything again, the heart monitor included
+        message = ("Settings saved." if saved or self.settings_path is None
+                   else "Settings apply now, but they couldn't be saved.")
+        if (new["skip_areas"], new["deadline"]) != (was["skip_areas"], was["deadline"]):
+            message += " Areas and the time limit apply from the next checkup."
+        self.statusBar().showMessage(message)
 
     def _system_scheme_changed(self, *_args):
         if self.theme_mode == themes.SYSTEM:
@@ -758,11 +1115,13 @@ class Window(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.setPalette(build_palette(t))
-        self.setStyleSheet(stylesheet(t))
+        self.setStyleSheet(stylesheet(t, self.own_frame))
         font = pill_font(self.font())
         self.pill_width = max(pill_size(font, text).width() for text in STATUS_TEXT.values())
         for sev, button in self.sev_buttons.items():
-            button.setIcon(dot_icon(t.status[sev].fg, t.subtle))
+            button.setIcon(dot_icon(t.status[sev].fg, t.subtle, self.devicePixelRatioF()))
+        for kind, button in self.window_buttons.items():
+            button.setIcon(window_icon(kind, t.muted, self.devicePixelRatioF()))
         self.empty_mark.setPixmap(nox_mark(t, 96, self.devicePixelRatioF()))
         for mode, action in self.theme_actions.items():
             action.setChecked(mode == self.theme_mode)
@@ -777,6 +1136,8 @@ class Window(QMainWindow):
                            (QKeySequence(Qt.Key.Key_Escape), self._escape),
                            (QKeySequence("Ctrl+Shift+C"), self.copy_note),
                            (QKeySequence.StandardKey.Save, lambda: self.export(True, "text")),
+                           (QKeySequence("Ctrl+,"), self.open_settings),
+                           (QKeySequence("Ctrl+L"), self.complaint.setFocus),
                            (QKeySequence.StandardKey.HelpContents, self.show_about),
                            (QKeySequence.StandardKey.Quit, self.close)):
             QShortcut(keys, self, activated=slot)
@@ -794,12 +1155,36 @@ class Window(QMainWindow):
         return self.busy
 
     def start_scan(self):
+        self._begin("")
+
+    def probe_ids(self):
+        if self._probe_ids is None:
+            from . import probes
+            self._probe_ids = [p.id for p in probes.load_all()]
+        return self._probe_ids
+
+    def recheck(self, finding_id: str) -> bool:
+        """Run one test again (after a treatment, say) and put its result into the checkup on screen."""
+        probe_id = clinic.probe_for(finding_id, self.probe_ids()) if self.report else None
+        if not probe_id or self.scanning() or self.close_requested:
+            return False
+        self._begin(probe_id)
+        return True
+
+    def _begin(self, only: str):
         if self.scanning() or self.close_requested:
             return  # rapid refreshes are ignored, never queued
         self.generation += 1
         self.busy = True
         self.last_error = ""
-        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self)
+        self._partial = only
+        options = settings_store.scan_options(self.settings)
+        if only:
+            options["selected"] = {only}
+        else:
+            self._starting_skipped = list(self.settings["skip_areas"])
+            self.rechecked = {}
+        worker = ScanThread(self.generation, self._scan_func, self._context_factory, self, options=options)
         queued = Qt.ConnectionType.QueuedConnection  # receiver: this window, in the GUI thread
         worker.progressed.connect(self._progress, queued)
         worker.completed.connect(self._completed, queued)
@@ -811,7 +1196,8 @@ class Window(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
-        self.statusBar().showMessage("Examining… every test only looks; nothing is changed.")
+        self.statusBar().showMessage("Checking that one test again…" if only
+                                     else "Examining… every test only looks; nothing is changed.")
         self.worker.start()
         self.render_all()
 
@@ -820,6 +1206,9 @@ class Window(QMainWindow):
             self.worker.cancel()
             self.cancel_btn.setEnabled(False)
             self.statusBar().showMessage("Stopping the checkup… ending the tests that are running.")
+
+    def toggle_maximized(self):
+        self.showNormal() if self.isMaximized() else self.showMaximized()
 
     def _escape(self):
         if self.scanning():
@@ -839,8 +1228,13 @@ class Window(QMainWindow):
     def _progress(self, done, total, title):
         if not self._on_gui_thread("_progress"):
             return
-        self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(done)
+        if self.progress.maximum() != max(total, 1) * 100:
+            self.progress.setRange(0, max(total, 1) * 100)
+            self.progress.setValue(0)
+        self.progress_glide.stop()
+        self.progress_glide.setStartValue(self.progress.value())
+        self.progress_glide.setEndValue(done * 100)
+        self.progress_glide.start()
         self.statusBar().showMessage(f"Examining {done} of {total}: {title}")
 
     @Slot(object, int)
@@ -849,12 +1243,27 @@ class Window(QMainWindow):
             return
         if generation != self.generation:
             return  # a stale scan never overwrites a newer one
-        # A checkup that was stopped early has unfinished tests; comparing it would call them changes.
-        self.follow = clinic.follow_up(result, self.remembered) if result["complete"] else None
-        self.report = result
-        if record.save(self.record_path, result):
-            self.remembered = record.snapshot(result)
         when = datetime.datetime.now().strftime("%H:%M")
+        if self._partial and self.report:
+            if not result["complete"]:
+                self.statusBar().showMessage("The re-check was stopped; the checkup is as it was.")
+            else:
+                self.report, changes = clinic.merge_recheck(self.report, result, self._partial)
+                said = clinic.recheck_text(changes)
+                for f in self.report["findings"]:
+                    if clinic.probe_for(f["id"], [self._partial]):
+                        self.rechecked[f["id"]] = f"Checked again at {when}."
+                        if self.follow:
+                            self.follow["changes"].pop(f["id"], None)  # that comparison is out of date now
+                self.statusBar().showMessage(said)
+            self.render_all()
+            return
+        # A checkup that was stopped early has unfinished tests; comparing it would call them changes.
+        self.follow = clinic.follow_up(result, record.last(self.history)) if result["complete"] else None
+        self.report = result
+        self.report_skipped = self._starting_skipped
+        if record.save(self.record_path, result):
+            self.history = record.load(self.record_path)
         self.statusBar().showMessage(
             f"Checkup finished at {when}, took {vm.duration_text(result['duration_ms'])}"
             + ("" if result["complete"] else " · stopped early: cancelled or out of time"))
@@ -929,12 +1338,14 @@ class Window(QMainWindow):
             self._set_verdict(themes.HEADLINE[state] + ("" if complete else " (stopped early)"), state,
                               f"{themes.HEADLINE[state]}: {counts}")
             stamp = datetime.datetime.fromisoformat(self.report["generated_at"]).astimezone()
+            self.setWindowTitle(f"{themes.HEADLINE[state]} - Doctor NoX")
             self.snapshot.setText(f"Last checkup {stamp:%Y-%m-%d %H:%M}, "
                                   f"took {vm.duration_text(self.report['duration_ms'])}")
             totals = self.report["totals"]
             for sev, button in self.sev_buttons.items():
                 button.setText(f"{STATUS_TEXT[sev]}  {totals[sev]}")
         else:
+            self.setWindowTitle("Doctor NoX")
             self._set_verdict("Examining…" if self.scanning() else "No checkup yet", None, "No findings yet")
             self.snapshot.setText("")
             for sev, button in self.sev_buttons.items():
@@ -943,7 +1354,11 @@ class Window(QMainWindow):
         self.scan_btn.setText("New checkup" if self.report else "Start checkup")
         self.copy_btn.setEnabled(self.report is not None)
         self.export_btn.setEnabled(self.report is not None)
-        self.symptom_btn.setText(f"What's wrong?  {clinic.SYMPTOM[self.symptom].label}")
+        self.symptom_btn.setText(clinic.SYMPTOM[self.symptom].label)
+        t = self.theme
+        resting = t.status[self.report["overall"]].fg if self.report else t.subtle
+        self.pulse.set_state(t.accent if self.scanning() else resting, self.scanning(),
+                             self.settings["monitor_motion"])
         for key, action in self.symptom_actions.items():
             action.setChecked(key == self.symptom)
         for vital in clinic.vitals(self.report):
@@ -1005,16 +1420,34 @@ class Window(QMainWindow):
             if self.last_error:
                 self.details.setHtml(vm.error_html(self.last_error, self.theme))
             else:
-                self.details.setHtml(vm.overview_html(self.report, self.scanning(), self.theme, self.follow,
-                                                      self.symptom))
+                self.details.setHtml(vm.overview_html(
+                    self.report, self.scanning(), self.theme, self.follow, self.symptom,
+                    skipped_areas=self.report_skipped, history=self.history,
+                    help_place=self._help_place() if self.report else None))
 
     def _toggle_severity(self, sev, on):
         (self.severities.add if on else self.severities.discard)(sev)
         self.render_list()
 
-    def set_symptom(self, key: str):
+    def describe(self, text: str | None = None):
+        """What's wrong, in the person's own words: find the complaint they mean."""
+        typed = (self.complaint.text() if text is None else text).strip()
+        key = clinic.guess(typed)
+        if key:
+            self.set_symptom(key, typed=True)
+            self.statusBar().showMessage(f"I took that as “{clinic.SYMPTOM[key].label}”. "
+                                         "Pick another from the list if I got it wrong.")
+        else:
+            self.set_symptom(clinic.GENERAL, typed=True)
+            if typed:
+                self.statusBar().showMessage("I have no tests for that, so here is the whole checkup. "
+                                             + clinic.ASK_FOR_HELP)
+
+    def set_symptom(self, key: str, typed: bool = False):
         """What's wrong? Shows the tests that bear on it, and the verdict speaks to it."""
         self.symptom = key if key in clinic.SYMPTOM else clinic.GENERAL
+        if not typed:
+            self.complaint.clear()
         if self.symptom == clinic.GENERAL:
             self.statusBar().showMessage("Showing the whole checkup.")
         else:
@@ -1039,6 +1472,7 @@ class Window(QMainWindow):
         self.severities = set(SEVERITIES)
         self.category = vm.OVERVIEW
         self.symptom = clinic.GENERAL
+        self.complaint.clear()
         self.selected_id = finding_id
         self.render_all()
         if self.tree.currentItem() is not None:
@@ -1059,7 +1493,87 @@ class Window(QMainWindow):
         if finding:
             self.selected_id = fid
             change = self.follow["changes"].get(fid) if self.follow else None
-            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono, change))
+            tool = self._tool(fid)
+            actions = {"recheck": bool(clinic.probe_for(fid, self.probe_ids())),
+                       "referral": tool["label"] if tool else None, "rechecked": self.rechecked.get(fid)}
+            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono, change, actions))
+
+    # the diagnosis pane's links ------------------------------------------------
+    def _detail_link(self, url):
+        link = url.toString()
+        if not link.startswith(vm.LINK):
+            return
+        action = link[len(vm.LINK):]
+        finding = next((f for f in (self.report or {}).get("findings", []) if f["id"] == self.selected_id), None)
+        if action == "help":
+            self.get_help()
+        elif action == "recheck" and finding:
+            self.recheck(finding["id"])
+        elif action == "open" and finding:
+            self.open_referral(finding["id"])
+        elif action.startswith("copy:") and finding:
+            known = clinic.commands(finding)
+            index = int(action[5:]) if action[5:].isdigit() else -1
+            if 0 <= index < len(known):
+                self._copy(known[index])
+                self.statusBar().showMessage(f"Copied: {known[index]}")
+
+    def _tool(self, finding_id: str):
+        """The desktop's own tool for a finding, when one is installed."""
+        injected = {"which": self._which} if self._which else {}
+        return referral.for_finding(finding_id, self._environ, **injected)
+
+    def _copy(self, text: str):
+        self.last_copied = text
+        if self.interactive:
+            QApplication.clipboard().setText(text)
+
+    def open_referral(self, finding_id: str) -> bool:
+        """Open the desktop's own tool for a finding. Doctor NoX only opens it; any change there is yours."""
+        tool = self._tool(finding_id)
+        if not tool:
+            return False
+        self.last_opened = tool["argv"]
+        if self.interactive and not QProcess.startDetached(tool["argv"][0], list(tool["argv"][1:])):
+            self.statusBar().showMessage(f"Couldn't open {tool['argv'][0]}.")
+            return False
+        self.statusBar().showMessage("Opened. Whatever you change there is yours to change; "
+                                     "then use Check this again.")
+        return True
+
+    def _os_release(self) -> dict:
+        from . import flatpak
+        try:
+            if flatpak.sandbox_app_path():  # Doctor's own Flatpak: the computer's os-release, not the runtime's
+                return referral.parse_os_release(Path("/run/host/os-release").read_text(errors="replace")[:65536])
+            return self._context_factory().os_release()
+        except OSError:
+            return {}
+
+    def _help_url(self) -> str:
+        if not hasattr(self, "_help_address"):
+            self._help_address = referral.help_url(self._os_release())
+        return self._help_address
+
+    def _help_place(self) -> str:
+        """Where Get help leads, as a host name; "" when only the note can be copied."""
+        return QUrl(self._help_url()).host() if self._help_url() else ""
+
+    def get_help(self):
+        """Copy the doctor's note and open where this distribution says to ask for help."""
+        if not self.report:
+            return
+        self._copy(self.note_text())
+        url = self._help_url()
+        if url:
+            self.last_opened = (url,)
+            if self.interactive:
+                QDesktopServices.openUrl(QUrl(url))
+            self.statusBar().showMessage(f"Doctor's note copied. Paste it at {QUrl(url).host()}, which is opening; "
+                                         "read it before you post it.")
+        else:
+            self.statusBar().showMessage("Doctor's note copied. Paste it where you ask for help; "
+                                         "read it before you post it.")
 
     # output ------------------------------------------------------------------
     def _identity(self):
@@ -1076,7 +1590,7 @@ class Window(QMainWindow):
     def copy_note(self):
         if not self.report:
             return
-        QApplication.clipboard().setText(self.note_text())
+        self._copy(self.note_text())
         self.statusBar().showMessage("Doctor's note copied. It is redacted for sharing; read it before you post it.")
 
     def export(self, redacted, fmt):
@@ -1134,8 +1648,8 @@ class Window(QMainWindow):
                 f"every treatment is yours to carry out. For Fedora (including Atomic and bootc), Debian and "
                 f"Ubuntu, Arch and openSUSE, with general tests everywhere else.</p>"
                 f"<p>No root, no repairs, no network requests and no telemetry. Reports are written only where "
-                f"you choose. To follow up, it keeps one small file of its own: the conditions found at your "
-                f"last checkup.</p>{sandboxed}"
+                f"you choose. It keeps two small files of its own: your settings and, unless you turn that off, "
+                f"a chart of your last 30 checkups.</p>{sandboxed}"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION}, {qt}, "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
@@ -1155,7 +1669,7 @@ def _application():
 def run() -> int:
     import signal
     app = _application()
-    window = Window(record_path=record.default_path())
+    window = Window(record_path=record.default_path(), settings_path=settings_store.default_path())
     app.aboutToQuit.connect(window.shutdown)
     # Ctrl+C in the launching terminal: close like the user would (deferred while scanning).
     signal.signal(signal.SIGINT, lambda *_: window.close())
@@ -1238,12 +1752,20 @@ def _demo_report():
                         finished=finished, complete=True, not_applicable=skipped)
 
 
-def _demo_previous(report):
-    """A made-up earlier checkup for the screenshots: free space was better then, the controller worse."""
-    earlier = datetime.datetime.fromisoformat(report["generated_at"]) - datetime.timedelta(days=4)
+def _demo_history(report):
+    """A made-up chart for the screenshots: eight earlier checkups over a month, with free space
+    falling, then the one on screen. Last time free space was better and the controller worse."""
+    now = datetime.datetime.fromisoformat(report["generated_at"])
     conditions = {f["id"]: f["severity"] for f in report["findings"]}
     conditions.update({"storage.space": "warn", "hardware.controllers": "error"})
-    return {"version": record.VERSION, "generated_at": earlier.isoformat(timespec="seconds"), "findings": conditions}
+    history = []
+    for n, (days, overall, free) in enumerate(((30, "pass", 221.0), (26, "pass", 214.5), (22, "warn", 209.9),
+                                               (18, "pass", 204.0), (14, "pass", 198.2), (10, "warn", 193.1),
+                                               (7, "warn", 188.0), (4, "error", 185.6))):
+        history.append({"generated_at": (now - datetime.timedelta(days=days)).isoformat(timespec="seconds"),
+                        "overall": overall, "findings": dict(conditions) if n == 7 else {},
+                        "metrics": {"disk": {"/": [free, 465.2]}, "temperature": 45 + n % 3}})
+    return history + [record.snapshot(report)]
 
 
 def screenshots(out_dir: str) -> int:
@@ -1270,7 +1792,9 @@ def screenshots(out_dir: str) -> int:
                                            ("details", QSize(1280, 800), demo, True),
                                            ("narrow", QSize(980, 760), demo, True)):
             window.report = report
-            window.follow = clinic.follow_up(report, _demo_previous(report)) if report else None
+            window._help_address = "https://www.debian.org/support"  # the demo is a Debian; nothing is read
+            window.history = _demo_history(report) if report else []
+            window.follow = clinic.follow_up(report, window.history[-2]) if report else None
             window.category = vm.OVERVIEW
             window.selected_id = ""
             window.resize(size)
@@ -1372,11 +1896,21 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
             time.sleep(0.02)
         return Finding("logs.boot", "logs", "Current boot errors", "unknown", "slow fixture")
 
-    probes = [Probe("fixture.fast", "system", "fixture", fixture_probe),
-              Probe("fixture.slow", "logs", "slow", slow_probe)]
+    space_runs = []
 
-    def scan(ctx, progress=None):
-        return engine.scan(ctx, progress=progress, probes=probes, deadline=30)
+    def space_probe(ctx):  # needs treatment the first time, healthy once it is checked again
+        space_runs.append(1)
+        if len(space_runs) == 1:
+            return Finding("storage.space", "storage", "Free space", "error", "Low free space: /",
+                           guidance=["Look at `journalctl --disk-usage`, and ask someone in `wheel`."])
+        return Finding("storage.space", "storage", "Free space", "pass", "Enough free space")
+
+    probes = [Probe("fixture.fast", "system", "fixture", fixture_probe),
+              Probe("fixture.slow", "logs", "slow", slow_probe),
+              Probe("storage.space", "storage", "Free space", space_probe)]
+
+    def scan(ctx, progress=None, selected=None, deadline=30):
+        return engine.scan(ctx, progress=progress, probes=probes, deadline=min(deadline, 30), selected=selected)
 
     def fixture_context():
         return Context(root=Path(tempfile.gettempdir()) / "doctor-nox-no-host", user="alice", hostname="ws")
@@ -1401,12 +1935,15 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     records = tempfile.TemporaryDirectory(prefix="doctor-nox-selftest-record-")
     record_path = Path(records.name) / "state" / record.FILE_NAME
     record_path.parent.mkdir(parents=True)
-    record_path.write_text(json.dumps({
-        "version": record.VERSION, "generated_at": "2026-01-01T00:00:00+00:00",
-        "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}))
+    record_path.write_text(json.dumps({"version": record.VERSION, "checkups": [{
+        "generated_at": "2026-01-01T00:00:00+00:00", "overall": "error",
+        "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}]}))
 
+    settings_path = Path(records.name) / "config" / settings_store.FILE_NAME
     window = Window(scan_func=scan, context_factory=fixture_context, autoscan=False, interactive=False,
-                    record_path=record_path)
+                    record_path=record_path, settings_path=settings_path,
+                    probe_ids=[probe.id for probe in probes], which=lambda name: f"/usr/bin/{name}",
+                    environ={"XDG_CURRENT_DESKTOP": "KDE"})
     window.show()
     app.processEvents()
     log("window shown")
@@ -1421,7 +1958,7 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     log("scan 1 started")
     check(pump(lambda: window.report is not None and not window.scanning()), "scan 1 completes")
     check(window.workers == {} and window.worker is None, "scan 1 thread joined and released")
-    check(window.tree.topLevelItemCount() == 6, "the diagnosis lists all 6 findings")
+    check(window.tree.topLevelItemCount() == 7, "the diagnosis lists all 7 findings")
     check(window.tree.topLevelItemCount() > 0 and window.tree.topLevelItem(0).data(0, SEV_ROLE) == "error",
           "most severe finding sorts first")
     check(bool(probe_threads) and all(n.startswith("doctor-probe") for n in probe_threads),
@@ -1438,8 +1975,34 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     check(not window.tree.isColumnHidden(CHANGE_COLUMN)
           and window.tree.topLevelItem(0).text(CHANGE_COLUMN) == "Worse", "the findings mark what got worse")
     saved = record.load(record_path)
-    check(saved is not None and saved["generated_at"] == window.report["generated_at"]
-          and oct(record_path.stat().st_mode & 0o777) == "0o600", "the finished checkup is remembered, privately")
+    check(len(saved) == 2 and saved[-1]["generated_at"] == window.report["generated_at"]
+          and oct(record_path.stat().st_mode & 0o777) == "0o600", "the finished checkup joins the chart, privately")
+    check("Your chart" in said and "2 checkups" in said and "Get help" in said,
+          "the diagnosis shows the chart and offers help")
+
+    # 1b'. treat, then check again: copy a command, open the desktop's tool, re-run one test
+    window.open_finding("storage.space")
+    app.processEvents()
+    shown = window.details.toPlainText()
+    check("journalctl --disk-usage" in shown and "Changes nothing." in shown and "Copy" in shown,
+          "a treatment's command is explained and can be copied")
+    check("See what is using the space" in shown and "Check this again" in shown,
+          "a finding offers the desktop's own tool and a re-check")
+    window._detail_link(QUrl(vm.LINK + "copy:0"))
+    window._detail_link(QUrl(vm.LINK + "open"))
+    check(window.last_copied == "journalctl --disk-usage" and window.last_opened == ("/usr/bin/filelight",),
+          "the links copy the command and name the tool (nothing is started in a self-test)")
+    window._detail_link(QUrl(vm.LINK + "recheck"))
+    check(pump(lambda: not window.scanning() and len(space_runs) == 2), "one test runs again on its own")
+    again = {f["id"]: f["severity"] for f in window.report["findings"]}
+    check(len(again) == 7 and again["storage.space"] == "pass" and window.report["totals"]["error"] == 1
+          and "Healthy now (was Needs treatment)" in window.statusBar().currentMessage(),
+          "the re-check replaces that test's result and says what changed")
+    check("Checked again at" in window.details.toPlainText() and "None needed." in window.details.toPlainText(),
+          "the details show the re-checked result")
+    window._detail_link(QUrl(vm.LINK + "help"))
+    check("doctor's note" in window.last_copied and "alice" not in window.last_copied,
+          "get help copies the redacted note")
     window.vital_tiles["temperature"].clicked.emit("hardware.sensors")
     app.processEvents()
     check("Temperatures" in window.details.toPlainText() and "None needed." in window.details.toPlainText(),
@@ -1450,16 +2013,74 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
           and "No internet" in window.symptom_btn.text(), "what's wrong narrows the findings and the verdict")
     window.set_symptom(clinic.GENERAL)
     app.processEvents()
-    check(window.tree.topLevelItemCount() == 6, "just a checkup shows every finding again")
+    check(window.tree.topLevelItemCount() == 7, "just a checkup shows every finding again")
     note = window.note_text()
     check("doctor's note" in note and "NEEDS TREATMENT" in note and "alice" not in note and "10.1.2.3" not in note,
           "the doctor's note is in the doctor's words and redacted")
+    window.describe("my wifi keeps dropping")
+    app.processEvents()
+    check(window.symptom == "network" and window.tree.topLevelItemCount() == 1,
+          "what's wrong can be typed in your own words")
+    window.describe("my printer is haunted")
+    app.processEvents()
+    check(window.symptom == clinic.GENERAL and window.tree.topLevelItemCount() == 7,
+          "a complaint with no tests shows the whole checkup")
+    check(pump(lambda: not window.pulse.timer.isActive(), 5) and not window.pulse.running
+          and window.pulse.colour == window.theme.status["error"].fg,
+          "the heart monitor gives one last beat, then rests in the condition's colour")
+    check(window.windowTitle() == "Needs treatment - Doctor NoX", "the window title carries the condition")
+
+    # 1b''. its own frame: the header is the title bar
+    frameless = bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint)
+    check(window.own_frame and frameless and all(b.isVisible() and not b.icon().isNull()
+                                                 for b in window.window_buttons.values())
+          and window.statusBar().isSizeGripEnabled(), "Doctor NoX draws its own title bar, buttons and resize grip")
+    window.toggle_maximized()
+    app.processEvents()
+    grown = window.isMaximized()
+    window.toggle_maximized()
+    app.processEvents()
+    check(grown and not window.isMaximized(), "its maximize button maximizes and restores")
+
+    # 1c. settings: they apply, are saved, and can be put back
+    dialog = window.open_settings()
+    check(dialog is not None and dialog.values() == window.settings == settings_store.clean(None),
+          "settings open with the defaults")
+    dialog.theme_buttons["light"].setChecked(True)
+    dialog.area_boxes["logs"].setChecked(False)
+    dialog.remember.setChecked(False)
+    dialog.motion.setChecked(False)
+    dialog.own_frame.setChecked(False)
+    dialog.deadline.setValue(20)
+    window.apply_settings(dialog.values())
+    app.processEvents()
+    kept = settings_store.load(settings_path)
+    check(window.theme is themes.LIGHT_THEME and kept["theme"] == "light" and kept["skip_areas"] == ["logs"]
+          and kept["deadline"] == 20 and kept["own_frame"] is False and window.own_frame
+          and oct(settings_path.stat().st_mode & 0o777) == "0o600",
+          "settings apply at once and are saved, privately")
+    check(not record_path.exists() and window.follow is None and window.record_path is None,
+          "turning off remembering deletes the remembered checkup")
+    window.start_scan()
+    check(pump(lambda: not window.scanning() and window.report is not None
+               and len(window.report["findings"]) == 6), "an area turned off is left out of the checkup")
+    check("Left out by your settings" in window.details.toPlainText() and not record_path.exists(),
+          "the diagnosis says what was left out, and nothing is remembered")
+    dialog.restore_defaults()
+    window.apply_settings(dialog.values())
+    dialog.deleteLater()
+    app.processEvents()
+    check(window.settings == settings_store.clean(None) and settings_store.load(settings_path) == window.settings
+          and record_path.exists(), "restoring the defaults puts everything back, remembering included")
+    log("settings done")
+
     remembered_at = record_path.stat().st_mtime_ns
     window.resize(1240, 780)
     app.processEvents()
     inside = window.rect()
-    parts = [window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn, window.more_btn,
-             window.search, *window.sev_buttons.values(), *window.vital_tiles.values()]
+    parts = [window.complaint, window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn,
+             window.more_btn, window.pulse, window.search, *window.sev_buttons.values(),
+             *window.vital_tiles.values(), *window.window_buttons.values()]
     outside = [w.accessibleName() or w.text() for w in parts if not w.isVisible() or not inside.contains(
         QRect(w.mapTo(window, w.rect().topLeft()), w.size()))]
     needs = window.minimumSizeHint().width()
@@ -1524,6 +2145,9 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     gate.clear()
     window.start_scan()
     check(pump(window.scanning, 5), "scan 2 running")
+    check(window.pulse.running and window.pulse.timer.isActive() and window.pulse.colour == window.theme.accent,
+          "the heart monitor sweeps during a checkup")
+    check(not window.grab().isNull() and window.paint_errors == [], "the sweeping monitor paints without errors")
     first_worker = window.worker
     window.start_scan()
     check(window.worker is first_worker and len(window.workers) == 1, "refresh during a scan is ignored")

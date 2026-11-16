@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from doctor_testlib import ROOT, Tree  # noqa: E402
 
-from doctor_nox import cli, clinic, engine, model, probes, record, report, runner, theme, viewmodel as vm  # noqa: E402
+from doctor_nox import (cli, clinic, engine, model, probes, record, referral, report, runner, settings,  # noqa: E402
+                        theme, viewmodel as vm)
 from doctor_nox.model import Finding  # noqa: E402
 from doctor_nox.probes import Probe  # noqa: E402
 
@@ -506,23 +508,23 @@ def checkup(*findings, complete=True, at=(2026, 11, 16, 18, 0)):
 class ClinicTests(unittest.TestCase):
     def test_the_verdict_says_the_most_important_thing_first(self):
         well = clinic.verdict(checkup(("storage.space", "pass"), ("hardware.audio", "info")))
-        self.assertEqual(well, ["Your PC is in good health. I ran 2 tests and nothing needs treatment."])
+        self.assertEqual(well, ["Your PC is in good health: 2 tests, nothing to treat."])
 
         ill = clinic.verdict(checkup(("storage.space", "error", "free some"), ("security.failed_units", "warn"),
                                      ("hardware.audio", "pass"), ("logs.boot", "unknown")))
         self.assertEqual(ill[0], "Your PC needs treatment.")
         self.assertEqual(ill[1], "1 thing needs treatment: Space.")
         self.assertIn("Keep an eye on Failed units.", ill)
-        self.assertIn("Start with Space; select it for the treatment.", ill)
-        self.assertTrue(any(line.startswith("I couldn't examine Boot.") and "clean bill of health" in line
-                            for line in ill))
+        self.assertIn("Start with Space.", ill)
+        self.assertIn("I couldn't examine Boot, so I can't call it healthy.", ill)
+        self.assertLessEqual(max(map(len, ill)), 60, "the verdict is short sentences")
         self.assertEqual(ill[-1], "The other 1 test came back fine.")
 
         watch = clinic.verdict(checkup(("hardware.sensors", "warn"), ("hardware.audio", "pass")))
-        self.assertEqual(watch[0], "Your PC is mostly well, but I would keep an eye on it.")
+        self.assertEqual(watch, ["Your PC is mostly well.", "Keep an eye on Sensors.", "The other 1 test came back fine."])
         self.assertFalse(any(line.startswith("Start with") for line in watch), "one finding needs no order")
         unseen = clinic.verdict(checkup(("logs.boot", "unknown")))
-        self.assertEqual(unseen[0], "I found nothing wrong, but I couldn't examine everything.")
+        self.assertEqual(unseen[0], "Nothing wrong that I could see, but I couldn't examine everything.")
         self.assertIn("stopped early", clinic.verdict(checkup(("logs.boot", "unknown"), complete=False))[-1])
         many = clinic.verdict(checkup(*[(f"storage.t{n}", "error") for n in range(5)]))
         self.assertEqual(many[1], "5 things need treatment: T0, T1 and 3 more.")
@@ -542,14 +544,15 @@ class ClinicTests(unittest.TestCase):
         self.assertTrue(clinic.related("anything.at_all", "no such complaint"), "an unknown complaint hides nothing")
 
         sound = clinic.verdict(rep, "sound")
-        self.assertEqual(sound[0], "For “No sound” I looked at 2 tests. They all came back fine, so the cause is "
-                                   "somewhere I can't see from here.")
-        self.assertEqual(sound[1], "Elsewhere, 2 other findings need a look: Space and Link.")
+        self.assertEqual(sound[0], "For “No sound” I looked at 2 tests. All fine, so the cause is somewhere I can't "
+                                   "see. Copy the doctor's note and share it where you ask for help.")
+        self.assertEqual(sound[1], "Elsewhere: Space and Link need a look.")
         net = clinic.verdict(rep, "network")
-        self.assertIn("Nothing is broken, but there is something to keep an eye on.", net[0])
+        self.assertIn("Nothing is broken, but one thing bears watching.", net[0])
         self.assertIn("Keep an eye on Link.", net)
+        self.assertEqual(net[-1], "Elsewhere: Space needs a look.")
         none = clinic.verdict(checkup(("storage.space", "pass")), "sound")
-        self.assertIn("no tests that apply to this system", none[0])
+        self.assertIn("I have no tests for “No sound” on this system.", none[0])
         self.assertIn("in good health", none[1])
         self.assertIn("No tests for “No sound” in this area",
                       vm.empty_state(rep, False, "storage", "", frozenset(model.SEVERITIES), "sound"))
@@ -615,7 +618,6 @@ class ClinicTests(unittest.TestCase):
         self.assertIn("Verdict:  Needs treatment (1 needs treatment, 1 to keep an eye on", note)
         self.assertIn("NEEDS TREATMENT\n- Updates & Packages / Package database", note)
         self.assertIn("KEEP AN EYE ON\n- Logs / Current boot errors", note)
-        self.assertNotIn("select it", note, "a note cannot be clicked")
         self.assertIn("nothing on this PC was changed", note.splitlines()[-1])
         self.assertIn("FULL LOCAL REPORT", clinic.note(rep))
         self.assertIn("1 test for other kinds of Linux did not apply here and was not run.",
@@ -623,6 +625,140 @@ class ClinicTests(unittest.TestCase):
         full = clinic.note(checkup(("storage.space", "error", "free some room"), ("logs.boot", "info")))
         self.assertIn("    Treatment: free some room", full)
         self.assertIn("NOTES\n- Logs / Boot", full)
+
+    def test_whats_wrong_can_be_typed_in_your_own_words(self):
+        for typed, meant in (("my wifi keeps dropping", "network"), ("No sound from the speakers!", "sound"),
+                             ("PC is really slow and laggy", "slow"), ("games stutter, low FPS", "graphics"),
+                             ("can't install apps", "apps"), ("the disk is full", "space"),
+                             ("is it safe? do I have a virus", "secure"), ("fan is so loud", "hot"),
+                             ("Xbox controller not detected", "controller"), ("updates fail", "updates"),
+                             ("it crashes on boot", "crash"), ("black screen", "graphics"),
+                             ("black screen on boot", "crash"),
+                             ("my printer is haunted", None), ("", None), ("???", None)):
+            self.assertEqual(clinic.guess(typed), meant, typed)
+        for symptom in clinic.SYMPTOMS[1:]:
+            self.assertTrue(symptom.words and symptom.tests, symptom.key)
+            self.assertEqual(clinic.guess(symptom.words[0]), symptom.key, "its own first word means it")
+            self.assertTrue(all(word == word.lower() for word in symptom.words), symptom.key)
+
+    def test_the_greeting_follows_the_clock(self):
+        self.assertEqual(clinic.greeting(8), "Good morning. Doctor NoX is in the house!")
+        self.assertEqual([clinic.greeting(h).split(".")[0] for h in (0, 4, 5, 11, 12, 17, 18, 21, 22, 23)],
+                         ["Night shift", "Night shift", "Good morning", "Good morning", "Good afternoon",
+                          "Good afternoon", "Good evening", "Good evening", "Night shift", "Night shift"])
+
+    def test_the_window_can_always_get_its_desktop_frame_back(self):
+        source = (PKG / "gui.py").read_text()
+        self.assertIn('ENV_FRAME = "DOCTOR_NOX_FRAME"', source)
+        self.assertIn('self.own_frame = frame == "own" if frame in ("own", "system") else self.settings["own_frame"]',
+                      source)
+        self.assertEqual(source.count("FramelessWindowHint, True"), 1)
+        self.assertIn("if self.own_frame:\n            self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)",
+                      source)
+        self.assertIn("setSizeGripEnabled(self.own_frame)", source)
+
+    def test_the_heart_monitor_trace_fits_its_strip(self):
+        for width, height in ((240, 36), (60, 34), (900, 40), (35, 34)):
+            points = clinic.pulse(width, height)
+            xs, ys = [x for x, _ in points], [y for _, y in points]
+            self.assertEqual((xs[0], xs[-1]), (0, width))
+            self.assertEqual(xs, sorted(xs), "the trace never turns back")
+            self.assertTrue(0 <= min(ys) and max(ys) <= height, (width, height, min(ys), max(ys)))
+            self.assertEqual(ys[0], ys[-1], "it starts and ends on the baseline")
+            self.assertLess(min(ys), height * 0.15, "the spike reaches near the top")
+        self.assertEqual(clinic.pulse(0, 36), [])
+        points = clinic.pulse(240, 36)
+        self.assertEqual(clinic.pulse_y(points, 0), points[0][1])
+        self.assertEqual(clinic.pulse_y(points, 9999), points[-1][1])
+        (x0, y0), (x1, y1) = points[5], points[6]
+        self.assertAlmostEqual(clinic.pulse_y(points, (x0 + x1) / 2), (y0 + y1) / 2)
+        self.assertEqual(clinic.pulse_y([], 5), 0.0)
+
+    def test_a_treatments_commands_are_found_and_explained(self):
+        f = Finding("storage.space", "storage", "Free space", "error", "Low", guidance=[
+            "Run `sudo dnf clean packages`, then look at `journalctl --disk-usage`.",
+            "Ask someone in `wheel`; never boot with `selinux=0`. Again: `journalctl --disk-usage`."]).to_dict()
+        self.assertEqual(clinic.commands(f), ["sudo dnf clean packages", "journalctl --disk-usage"])
+        self.assertEqual(clinic.explain("journalctl --disk-usage"),
+                         "Shows how much space the logs take. Changes nothing.")
+        self.assertEqual(clinic.explain("journalctl -b -k | grep -i xpad"), "Shows log messages. Changes nothing.")
+        self.assertEqual(clinic.explain("sudo dnf clean packages"),
+                         "Removes downloaded package files. This changes your system, as administrator: read it first.")
+        self.assertEqual(clinic.explain("pacman -Syu"), "Updates every package. This changes your system: read it first.")
+        for not_a_command in ("wheel", "selinux=0", "systemd-journal", "journalctlx", "dnfdragora", ""):
+            self.assertIsNone(clinic.explain(not_a_command), not_a_command)
+        seen = set()
+        for probe in probes.load_all():  # every command a real treatment can show is one the table knows
+            source = Path(sys.modules[probe.func.__module__].__file__).read_text()
+            seen.update(re.findall(r"`((?:sudo )?(?:dnf|apt|zypper|pacman|journalctl|systemctl status|bootc|rpm-ostree)"
+                                   r" [^`{]+)`", source))
+        self.assertGreater(len(seen), 15)
+        for command in seen:
+            self.assertIsNotNone(clinic.explain(command), command)
+        html = vm.detail_html(f, actions={"recheck": True, "referral": "See what is using the space",
+                                          "rechecked": "Checked again at 12:03."})
+        for expected in ('href="doctor:copy:0"', 'href="doctor:copy:1"', 'href="doctor:open"',
+                         'href="doctor:recheck"', "Checked again at 12:03.", "Changes nothing."):
+            self.assertIn(expected, html)
+        self.assertEqual(html.count("doctor:copy:1"), 2, "a command gets a Copy link on each step that names it")
+        plain = vm.detail_html(f)
+        self.assertNotIn("doctor:recheck", plain)
+        self.assertNotIn("doctor:open", plain)
+
+    def test_one_test_can_be_checked_again(self):
+        ids = ["system.image", "storage.space", "storage.layout", "hardware.audio"]
+        self.assertEqual(clinic.probe_for("storage.space", ids), "storage.space")
+        self.assertEqual(clinic.probe_for("system.image.pending", ids), "system.image")
+        self.assertIsNone(clinic.probe_for("storage.spacey", ids))
+        before = checkup(("hardware.audio", "pass"), ("system.image.booted", "pass"), ("system.image.pending", "warn"),
+                         ("storage.space", "error"))
+        again = checkup(("system.image.booted", "pass"), ("system.image.pending", "pass"), at=(2026, 11, 16, 19, 0))
+        merged, changes = clinic.merge_recheck(before, again, "system.image")
+        self.assertEqual([f["id"] for f in merged["findings"]],
+                         ["hardware.audio", "system.image.booted", "system.image.pending", "storage.space"])
+        self.assertEqual((merged["totals"]["warn"], merged["totals"]["pass"], merged["overall"]), (0, 3, "error"))
+        self.assertEqual(merged["generated_at"], before["generated_at"], "the checkup keeps its own time")
+        self.assertEqual(before["totals"]["warn"], 1, "the checkup on screen is not changed in place")
+        self.assertEqual(clinic.recheck_text(changes), "Booted: still Healthy. Pending: Healthy now (was Keep an eye on it).")
+        fixed, changes = clinic.merge_recheck(merged, checkup(("storage.space", "pass")), "storage.space")
+        self.assertEqual(fixed["overall"], "pass")
+        self.assertEqual(clinic.recheck_text(changes), "Space: Healthy now (was Needs treatment).")
+        self.assertEqual(clinic.recheck_text([]), "That test has nothing to report now.")
+        self.assertEqual(model.validate_report(fixed), [])
+
+    def test_the_chart_gives_a_prognosis_only_when_the_record_supports_it(self):
+        def at(day, free, heat=50, total=465.2):
+            rep = checkup(at=(2026, 11, day, 12, 0))
+            return {"generated_at": rep["generated_at"], "overall": "pass", "findings": {},
+                    "metrics": {"disk": {"/": [free, total]}, "temperature": heat}}
+        falling = [at(1, 200), at(4, 196), at(8, 190), at(12, 185), at(15, 180)]
+        self.assertEqual(clinic.prognosis(falling),
+                         ["/ has lost 20 GiB in about 2 weeks. At this rate it is full in about 4 months."])
+        self.assertEqual(clinic.prognosis(falling[:2]), [], "two checkups are not a trend")
+        self.assertEqual(clinic.prognosis([at(14, 200), at(15, 190), at(16, 180)]), [], "nor are three days")
+        self.assertEqual(clinic.prognosis([at(1, 180), at(8, 190), at(15, 200)]), [], "more room is not a problem")
+        self.assertEqual(clinic.prognosis([at(1, 200.4), at(8, 200.2), at(15, 200)]), [], "nor is a trickle")
+        self.assertEqual(clinic.prognosis([at(1, 400), at(8, 399), at(15, 397.5)]), [], "nor is years away")
+        soon = clinic.prognosis([at(1, 60), at(8, 40), at(15, 20)])
+        self.assertEqual(soon, ["/ has lost 40 GiB in about 2 weeks. At this rate it is full in 7 days."])
+        hot = clinic.prognosis([at(1, 200, 48), at(5, 200, 52), at(9, 200, 50), at(15, 200, 71)])
+        self.assertEqual(hot, ["Running hotter than usual: 71 °C now, 50 °C over the last 3 checkups."])
+        self.assertEqual(clinic.prognosis(falling[:4] + [{"generated_at": "junk"}]), clinic.prognosis(falling[:4]),
+                         "an entry whose time can't be read is skipped")
+        self.assertEqual(clinic.prognosis([]), [])
+
+        rep = checkup(at=(2026, 11, 15, 12, 0))
+        html = vm.overview_html(rep, history=falling, help_place="ask.example.org")
+        self.assertIn("Prognosis", html)
+        self.assertIn("full in about 4 months", html)
+        self.assertIn("5 checkups since 1 Nov 2026, oldest on the left: 5 in good health.", html)
+        self.assertIn("Get help</a> copies the doctor's note and opens ask.example.org.", html)
+        self.assertIn("to share where you ask for help", vm.overview_html(rep, help_place=""))
+        older = vm.overview_html(checkup(at=(2026, 11, 16, 12, 0)), history=falling)
+        self.assertNotIn("Prognosis", older, "the outlook is for the checkup the chart ends with")
+        self.assertIn("Your chart", older)
+        self.assertNotIn("Your chart", vm.overview_html(rep, history=falling[:1]))
+        self.assertNotIn("doctor:help", vm.overview_html(rep))
 
     def test_conditions_are_worded_for_every_severity_and_json_keeps_its_own(self):
         for words in (theme.STATUS_TEXT, theme.STATUS_COUNT, theme.STATUS_MEANING, theme.HEADLINE, clinic.CONCERN):
@@ -633,49 +769,157 @@ class ClinicTests(unittest.TestCase):
 
 
 class RecordTests(unittest.TestCase):
-    def test_the_last_checkup_is_remembered_privately_and_only_when_finished(self):
+    def test_finished_checkups_join_a_private_chart_of_the_last_thirty(self):
         rep = checkup(("storage.space", "error"), ("hardware.audio", "pass"))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state" / "doctor-nox" / record.FILE_NAME
-            self.assertIsNone(record.load(path))
+            self.assertEqual(record.load(path), [])
+            self.assertIsNone(record.last(record.load(path)))
             self.assertTrue(record.save(path, rep))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
             self.assertEqual([p.name for p in path.parent.iterdir()], [record.FILE_NAME], "no temporary file is left")
-            kept = json.loads(path.read_text())
-            self.assertEqual(kept, {"version": 1, "generated_at": rep["generated_at"],
-                                    "findings": {"storage.space": "error", "hardware.audio": "pass"}})
-            self.assertEqual(record.load(path), kept)
+            entry = {"generated_at": rep["generated_at"], "overall": "error", "metrics": {},
+                     "findings": {"storage.space": "error", "hardware.audio": "pass"}}
+            self.assertEqual(json.loads(path.read_text()), {"version": 1, "checkups": [entry]})
+            self.assertEqual(record.load(path), [entry])
+            self.assertTrue(record.save(path, rep))
+            self.assertEqual(len(record.load(path)), 1, "the same checkup is kept once")
             self.assertFalse(record.save(path, checkup(("storage.space", "pass"), complete=False)))
             self.assertFalse(record.save(path, report.redact_report(rep)))
             self.assertFalse(record.save(None, rep))
-            self.assertEqual(record.load(path), kept, "an unfinished checkup never replaces a finished one")
-            self.assertFalse(record.save(Path(tmp) / "state" / "doctor-nox" / record.FILE_NAME / "x", rep),
-                             "a place that cannot be written is not an error")
-            for junk in ("", "not json", "[]", '{"version": 2, "generated_at": "x", "findings": {}}',
-                         '{"version": 1, "generated_at": 5, "findings": {}}', "x" * (record.MAX_BYTES + 1)):
+            self.assertEqual(record.load(path), [entry], "an unfinished checkup never joins the chart")
+            for day in range(1, 29):
+                record.save(path, checkup(("storage.space", "pass"), at=(2026, 12, day, 9, 0)))
+                record.save(path, checkup(("storage.space", "pass"), at=(2026, 12, day, 18, 0)))
+            kept = record.load(path)
+            self.assertEqual(len(kept), record.KEEP)
+            self.assertEqual((kept[0]["generated_at"][:13], kept[-1]["generated_at"][:13]),
+                             ("2026-12-14T09", "2026-12-28T18"), "the newest thirty, oldest first")
+            self.assertEqual(record.last(kept), kept[-1])
+            self.assertFalse(record.save(path / "x", rep), "a place that cannot be written is not an error")
+            for junk in ("", "not json", "[]", '{"version": 2, "checkups": []}', '{"version": 1, "checkups": 5}',
+                         "x" * (record.MAX_BYTES + 1)):
                 path.write_text(junk)
-                self.assertIsNone(record.load(path), junk[:30])
-            path.write_text('{"version": 1, "generated_at": "t", "findings": {"a.b": "pass", "c.d": "bogus"}}')
-            self.assertEqual(record.load(path)["findings"], {"a.b": "pass"})
+                self.assertEqual(record.load(path), [], junk[:30])
+            path.write_text(json.dumps({"version": 1, "checkups": [
+                "junk", {"generated_at": 5, "findings": {}},
+                {"generated_at": "t", "overall": "bogus", "findings": {"a.b": "pass", "c.d": "bogus"},
+                 "metrics": {"disk": {"/": [1, 2], "/x": "no", "/y": [1, True]}, "temperature": "hot", "more": 1}}]}))
+            self.assertEqual(record.load(path), [{"generated_at": "t", "overall": "unknown", "findings": {"a.b": "pass"},
+                                                  "metrics": {"disk": {"/": [1.0, 2.0]}}}])
+            self.assertTrue(record.forget(path))
+            self.assertFalse(path.exists())
+            self.assertTrue(record.forget(path), "nothing to forget is fine")
 
     def test_where_it_is_kept(self):
         self.assertEqual(record.default_path({"XDG_STATE_HOME": "/s", "HOME": "/h"}),
-                         Path("/s/doctor-nox/last-checkup.json"))
+                         Path("/s/doctor-nox/checkups.json"))
         self.assertEqual(record.default_path({"XDG_STATE_HOME": "relative", "HOME": "/h"}),
-                         Path("/h/.local/state/doctor-nox/last-checkup.json"))
+                         Path("/h/.local/state/doctor-nox/checkups.json"))
 
     def test_only_the_window_a_person_opened_remembers(self):
         """Reports, self-tests and screenshots must leave no file behind (image builds run them)."""
-        for module in ("cli.py", "engine.py", "report.py", "viewmodel.py", "clinic.py"):
-            self.assertNotRegex((PKG / module).read_text(), r"import.*\brecord\b|\brecord\.(save|load)", module)
+        for module in ("cli.py", "engine.py", "report.py", "viewmodel.py", "clinic.py", "referral.py"):
+            self.assertIsNone(re.search(r"import.*\brecord\b|\brecord\.(save|load)", (PKG / module).read_text()),
+                              module)
         tree = ast.parse((PKG / "gui.py").read_text())
         funcs = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
-        self.assertIn("Window(record_path=record.default_path())", funcs["run"])
+        self.assertIn("Window(record_path=record.default_path(), settings_path=settings_store.default_path())",
+                      funcs["run"])
         for name in ("smoke_test", "screenshots", "self_test", "_self_test_steps", "_demo_report"):
             self.assertNotIn("default_path", funcs[name], name)
         writers = [p.name for p in PKG.rglob("*.py") if "os.replace(" in p.read_text()]
-        self.assertEqual(sorted(writers), ["record.py", "report.py"], "only reports you save and the record are written")
+        self.assertEqual(sorted(writers), ["record.py", "report.py", "settings.py"],
+                         "only reports you save, the record and your settings are written")
+        self.assertTrue(record.forget(None))
+
+
+class ReferralTests(unittest.TestCase):
+    def test_the_desktops_own_tool_when_it_is_installed(self):
+        installed = lambda *names: (lambda name: f"/usr/bin/{name}" if name in names else None)  # noqa: E731
+        kde, gnome = {"XDG_CURRENT_DESKTOP": "KDE"}, {"XDG_CURRENT_DESKTOP": "ubuntu:GNOME"}
+        self.assertEqual((referral.desktop(kde), referral.desktop(gnome), referral.desktop({})), ("kde", "gnome", ""))
+        self.assertEqual(referral.for_finding("hardware.audio", kde, installed("systemsettings", "pavucontrol")),
+                         {"label": "Open sound settings", "argv": ("/usr/bin/systemsettings", "kcm_pulseaudio")})
+        self.assertEqual(referral.for_finding("hardware.audio", gnome, installed("systemsettings", "pavucontrol"))
+                         ["argv"], ("/usr/bin/pavucontrol",), "another desktop's settings are not offered")
+        self.assertEqual(referral.for_finding("network.wifi", gnome, installed("gnome-control-center"))["argv"],
+                         ("/usr/bin/gnome-control-center", "network"))
+        self.assertEqual(referral.for_finding("storage.space", {}, installed("baobab"))["argv"], ("/usr/bin/baobab",))
+        self.assertEqual(referral.for_finding("system.image.pending", kde, installed("systemsettings")), None)
+        self.assertIsNone(referral.for_finding("hardware.audio", kde, installed()))
+        self.assertIsNone(referral.for_finding("hardware.audio", kde, lambda name: f"/home/me/bin/{name}"),
+                          "a tool outside the system directories is not started")
+        self.assertEqual(referral.key_for("logs.boot"), "logs")
+        self.assertIsNone(referral.key_for("storage.spacey"))
+        self.assertIsNone(referral.find("nonsense"))
+
+    def test_help_goes_where_the_distribution_says(self):
+        self.assertEqual(referral.help_url({"SUPPORT_URL": "https://ask.fedoraproject.org/", "HOME_URL": "https://x.org"}),
+                         "https://ask.fedoraproject.org/")
+        self.assertEqual(referral.help_url({"BUG_REPORT_URL": "https://bugs.example.org/", "HOME_URL": "https://x.org"}),
+                         "https://bugs.example.org/")
+        for bad in ("http://plain.example", "javascript:alert(1)", "https://a b.example", "https://x.example/<q>",
+                    "file:///etc/passwd", "https://" + "a" * 400, "https://exämple.org", ""):
+            self.assertEqual(referral.help_url({"SUPPORT_URL": bad}), "", bad[:30])
+        self.assertEqual(referral.parse_os_release('NAME="Fedora Linux"\n# c\nSUPPORT_URL=https://ask.example/\nX\n'),
+                         {"NAME": "Fedora Linux", "SUPPORT_URL": "https://ask.example/"})
+
+
+class SettingsTests(unittest.TestCase):
+    def test_defaults_and_anything_unusable_falls_back(self):
+        defaults = settings.clean(None)
+        self.assertEqual(defaults, {"theme": "system", "checkup_at_launch": True, "remember": True,
+                                    "monitor_motion": True, "own_frame": True, "skip_areas": [], "deadline": 60})
+        self.assertIsNot(settings.clean(None)["skip_areas"], settings.DEFAULTS["skip_areas"])
+        for junk in ([], "x", 5, {"theme": "neon", "remember": "yes", "deadline": "soon", "skip_areas": "logs"},
+                     {"deadline": True}, {"skip_areas": list(settings.AREAS)}, {"unknown": 1}):
+            self.assertEqual(settings.clean(junk), defaults, junk)
+        mine = settings.clean({"theme": "dark", "checkup_at_launch": False, "remember": False,
+                               "monitor_motion": False, "own_frame": False,
+                               "skip_areas": ["logs", "nonsense", "hardware"], "deadline": 9000})
+        self.assertEqual(mine, {"theme": "dark", "checkup_at_launch": False, "remember": False,
+                                "monitor_motion": False, "own_frame": False, "skip_areas": ["hardware", "logs"],
+                                "deadline": 300})
+        self.assertEqual(settings.clean({"deadline": 1})["deadline"], 5)
+        self.assertEqual(settings.clean({"deadline": 42.9})["deadline"], 42)
+        self.assertEqual(set(settings.AREAS), set(model.CATEGORY_TITLE))
+
+    def test_saved_privately_and_read_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "doctor-nox" / settings.FILE_NAME
+            self.assertEqual(settings.load(path), settings.clean(None))
+            self.assertTrue(settings.save(path, {"theme": "light", "skip_areas": ["network"], "bogus": 1}))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual([p.name for p in path.parent.iterdir()], [settings.FILE_NAME])
+            self.assertEqual(json.loads(path.read_text()), dict(settings.clean(None), theme="light",
+                                                                skip_areas=["network"]))
+            self.assertEqual(settings.load(path)["theme"], "light")
+            for junk in ("", "{", "[1]", "x" * (settings.MAX_BYTES + 1)):
+                path.write_text(junk)
+                self.assertEqual(settings.load(path), settings.clean(None), junk[:20])
+            self.assertFalse(settings.save(None, {}))
+            self.assertFalse(settings.save(path / "under-a-file", {}))
+        self.assertEqual(settings.default_path({"XDG_CONFIG_HOME": "/c", "HOME": "/h"}),
+                         Path("/c/doctor-nox/settings.json"))
+        self.assertEqual(settings.default_path({"HOME": "/h"}), Path("/h/.config/doctor-nox/settings.json"))
+
+    def test_a_checkup_is_asked_only_for_what_differs_from_the_defaults(self):
+        self.assertEqual(settings.scan_options(settings.clean(None)), {})
+        options = settings.scan_options(settings.clean({"skip_areas": ["logs", "network"], "deadline": 20}))
+        self.assertEqual(options, {"selected": set(settings.AREAS) - {"logs", "network"}, "deadline": 20.0})
+        rep = fixture_report()
+        self.assertIn("Left out by your settings", vm.overview_html(rep, skipped_areas=["logs", "nope"]))
+        self.assertIn("Logs. Turn them back on", vm.overview_html(rep, skipped_areas=["logs", "nope"]))
+        self.assertNotIn("Left out by your settings", vm.overview_html(rep))
+        self.assertEqual({v["key"]: v for v in clinic.vitals(rep)}["disk"]["detail"],
+                         "No test in this checkup measured it.")
+
+    def test_only_the_window_uses_settings(self):
+        for module in ("cli.py", "engine.py", "report.py", "viewmodel.py", "clinic.py", "record.py"):
+            self.assertIsNone(re.search(r"\bsettings\b.*import|import.*\bsettings\b", (PKG / module).read_text()),
+                              module)
 
 
 # ── theme (light/dark palettes) ─────────────────────────────────────────────
@@ -770,12 +1014,47 @@ class SourceSafetyTests(unittest.TestCase):
                     for kw in node.keywords:
                         if kw.arg == "shell":
                             self.assertEqual(ast.unparse(kw.value), "False", f"{rel}: shell=")
+            if path.name == "clinic.py":
+                # Its table explains the commands a treatment mentions, so it names them. It cannot
+                # start any: it imports nothing that could.
+                imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+                self.assertEqual(imported, {"datetime", "re"}, "clinic.py only words things")
+                continue
             for word in ("sudo ", "pkexec", "polkit", "dnf ", "rpm-ostree upgrade", "bootc upgrade"):
                 for line in source.splitlines():
                     stripped = line.strip()
                     if word in stripped and not stripped.startswith("#") and "`" not in stripped \
                             and "never" not in stripped.lower() and "Doctor" not in stripped:
                         self.fail(f"{rel}: suspicious '{word.strip()}' in: {stripped}")
+
+    def test_the_window_opens_only_listed_tools_and_only_when_asked(self):
+        """Referrals: the one place besides runner.py that starts a program, and what it may start."""
+        source = (PKG / "gui.py").read_text()
+        tree = ast.parse(source)
+        methods = {n.name: ast.unparse(n) for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        self.assertEqual(source.count("QProcess."), 1)
+        self.assertIn("QProcess.startDetached(tool['argv'][0], list(tool['argv'][1:]))", methods["open_referral"])
+        self.assertIn("self.interactive and", methods["open_referral"], "never in a self-test")
+        self.assertEqual(source.count("QDesktopServices."), 1)
+        self.assertIn("QDesktopServices.openUrl", methods["get_help"])
+        self.assertIn("if self.interactive", methods["get_help"])
+        for other in PKG.rglob("*.py"):
+            if other.name != "gui.py":
+                self.assertNotIn("QProcess", other.read_text(), other.name)
+        programs = set()
+        for key, (label, candidates) in referral.TOOLS.items():
+            self.assertTrue(label and label[0].isupper(), key)
+            for where, argv in candidates:
+                self.assertIn(where, ("kde", "gnome", "any"))
+                programs.add(argv[0])
+                for part in argv:
+                    self.assertRegex(part, r"^[A-Za-z0-9_=-]+$", "a fixed word: no path, shell or pattern")
+        self.assertEqual(programs, {"systemsettings", "gnome-control-center", "pavucontrol", "nm-connection-editor",
+                                    "blueman-manager", "firewall-config", "filelight", "baobab",
+                                    "plasma-systemmonitor", "gnome-system-monitor", "plasma-discover",
+                                    "gnome-software", "ksystemlog", "gnome-logs"})
+        self.assertFalse(programs & {"sh", "bash", "sudo", "pkexec", "konsole", "xterm", "gnome-terminal"})
+        self.assertTrue({key for _test, key in referral.FOR_TEST} <= set(referral.TOOLS))
 
     def test_network_probe_never_reads_ssids(self):
         source = (PKG / "probes/network.py").read_text()

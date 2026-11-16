@@ -11,7 +11,7 @@ import json
 import os
 import re
 
-from ..distro import FAMILY_TITLE, OSTREE
+from ..distro import FAMILY_TITLE, OSTREE, SYSTEMD
 from ..model import INFO, PASS, UNKNOWN, WARN, Finding
 from . import finding, probe
 
@@ -372,3 +372,35 @@ def image(ctx):
                     "Deployment status unavailable to this user" + ("; a deployment is staged" if staged else ""),
                     reason="Neither bootc nor rpm-ostree answered.", evidence=ev,
                     guidance=["Run `rpm-ostree status`, or `sudo bootc status`, yourself. Doctor never elevates."])]
+
+
+_SPAN = re.compile(r"(?:(\d+)h )?(?:(\d+)min )?([\d.]+)(ms|s)")
+
+
+def _seconds(text):
+    m = _SPAN.fullmatch(text.strip())
+    if not m:
+        return None
+    hours, minutes, value, unit = m.groups()
+    return int(hours or 0) * 3600 + int(minutes or 0) * 60 + float(value) / (1000 if unit == "ms" else 1)
+
+
+@probe("system.startup", CAT, "Startup time", applies=SYSTEMD)
+def startup(ctx):
+    """How long the last start took, from `systemd-analyze time` (a read-only query)."""
+    title = "Startup time"
+    res = ctx.runner.run("systemd-analyze", "time")
+    line = next((l for l in res.stdout.splitlines() if l.startswith("Startup finished in")), "")
+    total = _seconds(line.rsplit("=", 1)[1]) if res.ok and "=" in line else None
+    if total is None:
+        return finding("system.startup", CAT, title, UNKNOWN, "Startup time could not be read",
+                       reason=(res.stdout.strip().splitlines() or [res.describe()])[0] if res.ok else res.describe(),
+                       guidance=["Normal in a container, and for a moment right after starting up."])
+    took = f"{total:.0f} s" if total < 90 else f"{int(total // 60)} min {int(total % 60)} s"
+    ev = [line]
+    if total < 90:
+        return finding("system.startup", CAT, title, PASS, f"Started up in {took}", evidence=ev)
+    return finding("system.startup", CAT, title, INFO, f"Starting up took {took}", evidence=ev,
+                   guidance=["`systemd-analyze blame` lists what took longest, slowest first. It only reads.",
+                             "Time spent in the firmware and boot loader is counted too, and is set outside "
+                             "the operating system."])
