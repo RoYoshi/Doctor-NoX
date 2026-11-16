@@ -32,14 +32,26 @@ MODES = (SYSTEM, LIGHT, DARK)
 MODE_LABEL = {SYSTEM: "Match system", LIGHT: "Light", DARK: "Dark"}
 ENV_MODE = "DOCTOR_NOX_THEME"
 
-# Window wording for each status (reports and the CLI keep the uppercase SEVERITY_LABEL).
-STATUS_TEXT = {ERROR: "Error", WARN: "Warning", UNKNOWN: "Unknown", INFO: "Info", PASS: "Pass"}
-# How a number of results is written: "1 error", "2 errors", "3 passed".
-STATUS_COUNT = {ERROR: ("error", "errors"), WARN: ("warning", "warnings"), UNKNOWN: ("unknown", "unknown"),
-                INFO: ("info", "info"), PASS: ("passed", "passed")}
-# One-line headline for the overall state of a scan.
-HEADLINE = {ERROR: "Problems found", WARN: "Needs attention", UNKNOWN: "Partly verified",
-            INFO: "Healthy", PASS: "Healthy"}
+# The window speaks as a doctor would (see clinic.py). These are its words for each condition;
+# --text, --summary and JSON keep the report's own severities (SEVERITY_LABEL).
+STATUS_TEXT = {ERROR: "Needs treatment", WARN: "Keep an eye on it", UNKNOWN: "Couldn't examine",
+               INFO: "Note", PASS: "Healthy"}
+# How a number of results is written: "1 needs treatment", "2 need treatment", "3 notes".
+STATUS_COUNT = {ERROR: ("needs treatment", "need treatment"), WARN: ("to keep an eye on", "to keep an eye on"),
+                UNKNOWN: ("couldn't be examined", "couldn't be examined"), INFO: ("note", "notes"),
+                PASS: ("healthy", "healthy")}
+# One-line headline for the overall state of a checkup.
+HEADLINE = {ERROR: "Needs treatment", WARN: "Needs attention", UNKNOWN: "Couldn't examine everything",
+            INFO: "In good health", PASS: "In good health"}
+# What each condition means, in the doctor's words (the legend and the line under a result).
+STATUS_MEANING = {
+    PASS: "Examined and healthy.",
+    INFO: "Examined; worth knowing, not a problem (for example automatic updates being off).",
+    WARN: "Examined; not urgent, but it may need care.",
+    ERROR: "Examined; a problem that is likely to break something or put the system at risk.",
+    UNKNOWN: "Couldn't be examined (a missing tool, a permission, an unsupported format). "
+             "That is not a clean bill of health.",
+}
 
 
 @dataclass(frozen=True)

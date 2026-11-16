@@ -1,8 +1,9 @@
 """Doctor NoX desktop window (PySide6 Qt Widgets).
 
 Presentation only: scanning lives in engine.py, filtering/ordering/detail text
-in viewmodel.py, colours in theme.py. Scans run on a QThread; the window never
-blocks on a subprocess, and it never closes while a scan thread is still alive.
+in viewmodel.py, the doctor's words and behaviour in clinic.py, colours in
+theme.py. A checkup runs on a QThread; the window never blocks on a subprocess,
+and it never closes while a scan thread is still alive.
 """
 from __future__ import annotations
 
@@ -19,12 +20,12 @@ from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QFont, QFontDa
                            QPen, QPixmap, QPolygonF, QShortcut)
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QProgressBar, QPushButton, QSplitter, QStackedWidget, QStyle, QStyledItemDelegate,
-                               QStyleOptionViewItem, QTextBrowser, QToolButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QSizePolicy, QSplitter, QStackedWidget, QStyle,
+                               QStyledItemDelegate, QStyleOptionViewItem, QTextBrowser, QToolButton, QTreeWidget,
+                               QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from . import APP_ID, VERSION
-from . import engine, report as reports, theme as themes, viewmodel as vm
+from . import clinic, engine, record, report as reports, theme as themes, viewmodel as vm
 from .context import Context
 from .model import CATEGORY_TITLE, SCHEMA_VERSION, SEVERITIES
 from .theme import STATUS_TEXT, Theme
@@ -36,7 +37,9 @@ NARROW = 1180  # below this width the detail pane moves under the list
 SEV_ROLE = Qt.ItemDataRole.UserRole + 1         # results table: severity key of the row
 NAV_BADGE_ROLE = Qt.ItemDataRole.UserRole + 2   # sidebar: pill text ("3", "OK", "")
 NAV_SEV_ROLE = Qt.ItemDataRole.UserRole + 3     # sidebar: pill severity ("" for none)
-SAFETY_NOTE = "Read-only: needs no root, makes no network requests, uploads nothing"
+CHANGE_COLUMN = 4                               # results table: "Since last checkup"
+SUBTITLE = "A doctor for your PC: it examines and prescribes, and never operates"
+SAFETY_NOTE = "Examines only: needs no root, makes no network requests, uploads nothing, changes nothing"
 QT_MESSAGES: list[str] = []  # Qt warnings captured during self-tests (stylesheet parse errors fail the test)
 
 
@@ -181,6 +184,8 @@ def stylesheet(t: Theme) -> str:
     QLabel#subtitle, QLabel#snapshot, QLabel#safety, QLabel#section {{ color: {t.muted}; }}
     QLabel#verdict {{ border-radius: 13px; padding: 4px 14px; font-weight: 600; }}
     QFrame#empty {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 8px; }}
+    QFrame#vital {{ background: {t.surface}; border: 1px solid {t.border}; border-radius: 8px; }}
+    QLabel#vitalLabel {{ color: {t.muted}; }}
     QLabel#emptyText {{ color: {t.muted}; }}
     QLineEdit {{ background: {t.surface}; color: {t.text}; border: 1px solid {t.border_strong};
                  border-radius: 6px; padding: 6px 10px; selection-background-color: {t.accent};
@@ -371,6 +376,59 @@ class NavDelegate(_PillDelegate):
 
 
 # ── worker ───────────────────────────────────────────────────────────────────
+class VitalTile(QFrame):
+    """One vital sign: a caption over a short reading, edged in its condition's colour.
+
+    A click opens the test the reading comes from. Tiles are a shortcut for the pointer; the
+    same tests are in the findings list, which is where the keyboard reaches them.
+    """
+    clicked = Signal(str)
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(parent, objectName="vital")
+        self.label = label
+        self.finding_id = ""
+        self.reading = clinic.NO_VALUE
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 7, 12, 8)
+        layout.setSpacing(1)
+        self.caption = QLabel(label, objectName="vitalLabel")
+        self.caption.setFont(scaled_font(self.font(), 0.92))
+        self.value = QLabel(self.reading)
+        self.value.setFont(scaled_font(self.font(), 1.1, QFont.Weight.DemiBold))
+        # The reading may be clipped, never a reason for the window to grow.
+        self.value.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.value.setMinimumWidth(40)
+        layout.addWidget(self.caption)
+        layout.addWidget(self.value)
+
+    def show_vital(self, vital: dict, t: Theme):
+        self.finding_id = vital["finding_id"]
+        self.reading = vital["value"]
+        severity = vital["severity"]
+        edge = t.status[severity].fg if severity else t.border_strong
+        self.setStyleSheet(f"QFrame#vital {{ border-left: 3px solid {edge}; }}")
+        self.setCursor(Qt.CursorShape.PointingHandCursor if self.finding_id else Qt.CursorShape.ArrowCursor)
+        condition = STATUS_TEXT[severity] if severity else ""
+        self.setToolTip("\n".join(x for x in (vital["detail"], condition) if x))
+        self.setAccessibleName(f"{self.label}: {self.reading}" + (f". {condition}" if condition else ""))
+        self._fit()
+
+    def _fit(self):
+        room = max(0, self.width() - 27)  # the margins and the coloured edge
+        metrics = QFontMetrics(self.value.font())
+        self.value.setText(metrics.elidedText(self.reading, Qt.TextElideMode.ElideRight, room))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.finding_id and self.rect().contains(event.pos()):
+            self.clicked.emit(self.finding_id)
+        super().mouseReleaseEvent(event)
+
+
 class ScanThread(QThread):
     """Runs engine.scan off the GUI thread.
 
@@ -410,9 +468,15 @@ class ScanThread(QThread):
 
 # ── window ───────────────────────────────────────────────────────────────────
 class Window(QMainWindow):
-    def __init__(self, *, scan_func=engine.scan, context_factory=Context, autoscan=True, interactive=True):
+    def __init__(self, *, scan_func=engine.scan, context_factory=Context, autoscan=True, interactive=True,
+                 record_path=None):
         super().__init__()
         self.interactive = interactive        # False in self-tests: never open modal dialogs
+        # Follow-ups: where the last checkup is remembered (None: nowhere, nothing is written).
+        self.record_path = record_path
+        self.remembered = record.load(record_path)  # the checkup the next one is compared with
+        self.follow = None                    # clinic.follow_up() for the report on screen
+        self.symptom = clinic.GENERAL         # "What's wrong?"
         self.workers: dict[int, ScanThread] = {}  # every thread not yet joined, by generation
         self.thread_violations: list[str] = []    # UI code that ran off the GUI thread (must stay empty)
         self.paint_errors: list[str] = []         # delegate paint failures (must stay empty)
@@ -467,7 +531,7 @@ class Window(QMainWindow):
         titles.setSpacing(1)
         self.title = QLabel("Doctor NoX", objectName="title")
         self.title.setFont(scaled_font(self.font(), 1.45, QFont.Weight.DemiBold))
-        self.subtitle = QLabel("Read-only system health diagnostics", objectName="subtitle")
+        self.subtitle = QLabel(SUBTITLE, objectName="subtitle")
         self.subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         titles.addWidget(self.title)
         titles.addWidget(self.subtitle)
@@ -476,61 +540,55 @@ class Window(QMainWindow):
         right = QVBoxLayout()
         right.setSpacing(4)
         self.verdict = QLabel("—", objectName="verdict", alignment=Qt.AlignmentFlag.AlignCenter)
-        self.verdict.setAccessibleName("Overall system state")
-        self.snapshot = QLabel("No scan yet", objectName="snapshot", alignment=Qt.AlignmentFlag.AlignRight)
+        self.verdict.setAccessibleName("Overall condition")
+        self.snapshot = QLabel("No checkup yet", objectName="snapshot", alignment=Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.verdict, 0, Qt.AlignmentFlag.AlignRight)
         right.addWidget(self.snapshot, 0, Qt.AlignmentFlag.AlignRight)
         head.addLayout(right)
         root.addLayout(head)
 
-        # Toolbar: search and status filters on the left, actions on the right.
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-        self.search = QLineEdit(placeholderText="Filter checks…  (Ctrl+F, try is:problem)")
-        self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(220)
-        self.search.setAccessibleName("Filter checks")
-        self.search.textChanged.connect(self.render_list)
-        bar.addWidget(self.search, 2)
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        self.sev_buttons = {}
-        for sev in SEVERITIES:
-            b = QToolButton(text=STATUS_TEXT[sev])
-            b.setCheckable(True)
-            b.setChecked(True)
-            b.setProperty("chip", True)
-            b.setProperty("sev", sev)
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-            b.setIconSize(QSize(12, 12))
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(f"Show or hide {STATUS_TEXT[sev]} results")
-            b.setAccessibleName(f"Show {STATUS_TEXT[sev]} results")
-            b.toggled.connect(lambda on, s=sev: self._toggle_severity(s, on))
-            self.sev_buttons[sev] = b
-            chips.addWidget(b)
-        bar.addLayout(chips)
-        bar.addStretch(1)
+        # The consultation: what's wrong on the left, the checkup and its paperwork on the right.
+        consult = QHBoxLayout()
+        consult.setSpacing(8)
+        self.symptom_btn = QToolButton(objectName="menuButton")
+        self.symptom_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.symptom_btn.setToolTip("Tell the doctor what's wrong: the tests that bear on it are shown, "
+                                    "and the verdict speaks to it")
+        self.symptom_btn.setAccessibleName("What's wrong?")
+        complaints = QMenu(self.symptom_btn)
+        complaint_group = QActionGroup(complaints)
+        complaint_group.setExclusive(True)
+        self.symptom_actions = {}
+        for symptom in clinic.SYMPTOMS:
+            act = QAction(symptom.label, complaints, checkable=True)
+            act.triggered.connect(lambda _=False, key=symptom.key: self.set_symptom(key))
+            complaint_group.addAction(act)
+            complaints.addAction(act)
+            self.symptom_actions[symptom.key] = act
+        self.symptom_btn.setMenu(complaints)
+        consult.addWidget(self.symptom_btn)
+        consult.addStretch(1)
         self.progress = QProgressBar(maximumWidth=140, visible=False)
         self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
-        self.progress.setAccessibleName("Scan progress")
-        bar.addWidget(self.progress)
+        self.progress.setAccessibleName("Checkup progress")
+        consult.addWidget(self.progress)
         self.cancel_btn = QPushButton("Cancel", visible=False)
-        self.cancel_btn.setToolTip("Stop the running scan (Esc)")
+        self.cancel_btn.setToolTip("Stop the checkup (Esc)")
         self.cancel_btn.clicked.connect(self.cancel_scan)
-        bar.addWidget(self.cancel_btn)
-        self.scan_btn = QPushButton("Scan", objectName="primary")
-        self.scan_btn.setToolTip("Run all read-only checks (F5)")
+        consult.addWidget(self.cancel_btn)
+        self.scan_btn = QPushButton("Start checkup", objectName="primary")
+        self.scan_btn.setToolTip("Examine this PC: every test only looks, none changes anything (F5)")
         self.scan_btn.clicked.connect(self.start_scan)
-        bar.addWidget(self.scan_btn)
-        self.copy_btn = QPushButton("Copy summary")
-        self.copy_btn.setToolTip("Copy a redacted summary for sharing (Ctrl+Shift+C)")
-        self.copy_btn.clicked.connect(self.copy_summary)
-        bar.addWidget(self.copy_btn)
+        consult.addWidget(self.scan_btn)
+        self.copy_btn = QPushButton("Copy doctor's note")
+        self.copy_btn.setToolTip("Copy the verdict and findings, redacted for sharing (Ctrl+Shift+C)")
+        self.copy_btn.clicked.connect(self.copy_note)
+        consult.addWidget(self.copy_btn)
         self.export_btn = QToolButton(text="Export", objectName="menuButton")
         self.export_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.export_btn.setToolTip("Save or copy a report. Redacted reports hide user, host and network details.")
+        self.export_btn.setToolTip("Save or copy the full report. Redacted reports hide user, host and "
+                                   "network details.")
         menu = QMenu(self.export_btn)
         for label, redacted, fmt in (("Save redacted report for sharing (.txt)…", True, "text"),
                                      ("Save redacted report for sharing (.json)…", True, "json"),
@@ -546,10 +604,10 @@ class Window(QMainWindow):
             menu.addAction(act)
         self.export_btn.setMenu(menu)
         self.export_btn.setAccessibleName("Export report")
-        bar.addWidget(self.export_btn)
+        consult.addWidget(self.export_btn)
         self.more_btn = QToolButton(text="View", objectName="menuButton")
         self.more_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.more_btn.setToolTip("Appearance and information about Doctor")
+        self.more_btn.setToolTip("Appearance and information about Doctor NoX")
         self.more_btn.setAccessibleName("View options")
         more = QMenu(self.more_btn)
         appearance = more.addMenu("Appearance")
@@ -567,21 +625,58 @@ class Window(QMainWindow):
         about.triggered.connect(self.show_about)
         more.addAction(about)
         self.more_btn.setMenu(more)
-        bar.addWidget(self.more_btn)
+        consult.addWidget(self.more_btn)
+        root.addLayout(consult)
+
+        # Vital signs: four readings from the last checkup; a click opens the test behind one.
+        vital_row = QHBoxLayout()
+        vital_row.setSpacing(8)
+        self.vital_tiles = {}
+        for vital in clinic.vitals(None):
+            tile = VitalTile(vital["label"])
+            tile.clicked.connect(self.open_finding)
+            self.vital_tiles[vital["key"]] = tile
+            vital_row.addWidget(tile, 1)
+        root.addLayout(vital_row)
+
+        # Above the findings: search and which conditions are shown.
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self.search = QLineEdit(placeholderText="Find in the findings…  (Ctrl+F, try is:problem)")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(160)
+        self.search.setAccessibleName("Find in the findings")
+        self.search.textChanged.connect(self.render_list)
+        bar.addWidget(self.search, 1)
+        self.sev_buttons = {}
+        for sev in SEVERITIES:
+            b = QToolButton(text=STATUS_TEXT[sev])
+            b.setCheckable(True)
+            b.setChecked(True)
+            b.setProperty("chip", True)
+            b.setProperty("sev", sev)
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setIconSize(QSize(12, 12))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(f"Show or hide the findings that are “{STATUS_TEXT[sev]}”")
+            b.setAccessibleName(f"Show findings: {STATUS_TEXT[sev]}")
+            b.toggled.connect(lambda on, s=sev: self._toggle_severity(s, on))
+            self.sev_buttons[sev] = b
+            bar.addWidget(b)
         root.addLayout(bar)
 
-        # Body: groups | results | details (details move below the results when narrow).
+        # Body: areas | findings | details (details move below the findings when narrow).
         self.body = QSplitter(Qt.Orientation.Horizontal)
         self.body.setChildrenCollapsible(False)
         nav_panel = QWidget()
         nav_layout = QVBoxLayout(nav_panel)
         nav_layout.setContentsMargins(0, 0, 0, 0)
         nav_layout.setSpacing(6)
-        section = QLabel("Check groups", objectName="section")
+        section = QLabel("Areas examined", objectName="section")
         section.setFont(scaled_font(self.font(), 0.92, QFont.Weight.DemiBold))
         nav_layout.addWidget(section)
         self.nav = QListWidget(objectName="nav")
-        self.nav.setAccessibleName("Check groups")
+        self.nav.setAccessibleName("Areas examined")
         self.nav.setMinimumWidth(190)
         self.nav.setUniformItemSizes(True)
         self.nav_delegate = NavDelegate(self)
@@ -594,24 +689,26 @@ class Window(QMainWindow):
         self.inner.setChildrenCollapsible(False)
         self.stack = QStackedWidget()
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(4)
-        self.tree.setHeaderLabels(["Status", "Group", "Check", "Result"])
+        self.tree.setColumnCount(5)
+        self.tree.setHeaderLabels(["Condition", "Area", "Test", "Finding", "Since last checkup"])
         self.tree.setRootIsDecorated(False)
         self.tree.setUniformRowHeights(True)
         self.tree.setAllColumnsShowFocus(True)
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.tree.setAccessibleName("Check results")
+        self.tree.setAccessibleName("Findings")
         self.status_delegate = StatusDelegate(self)
         self.tree.setItemDelegateForColumn(0, self.status_delegate)
         hdr = self.tree.header()
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         hdr.setHighlightSections(False)
+        hdr.setStretchLastSection(False)  # the Finding column takes the room, not the last one
         for col, mode in enumerate((QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.ResizeToContents,
-                                    QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.Stretch)):
+                                    QHeaderView.ResizeMode.ResizeToContents, QHeaderView.ResizeMode.Stretch,
+                                    QHeaderView.ResizeMode.ResizeToContents)):
             hdr.setSectionResizeMode(col, mode)
         self.tree.currentItemChanged.connect(self._finding_changed)
-        # Empty state: the NoX mark (before the first scan) above a short explanation.
+        # Empty state: the NoX mark (before the first checkup) above a short explanation.
         self.empty_box = QFrame(objectName="empty")
         empty_layout = QVBoxLayout(self.empty_box)
         empty_layout.setContentsMargins(32, 32, 32, 32)
@@ -628,7 +725,7 @@ class Window(QMainWindow):
         self.inner.addWidget(self.stack)
         self.details = QTextBrowser(objectName="details")
         self.details.setOpenLinks(False)
-        self.details.setAccessibleName("Check details")
+        self.details.setAccessibleName("Diagnosis and treatment")
         self.details.document().setDocumentMargin(16)
         self.inner.addWidget(self.details)
         self.inner.setStretchFactor(0, 3)
@@ -639,11 +736,11 @@ class Window(QMainWindow):
         root.addWidget(self.body, 1)
 
         self.safety = QLabel(SAFETY_NOTE, objectName="safety")
-        self.safety.setAccessibleName("Doctor is read-only, needs no root, makes no network requests "
-                                      "and uploads nothing")
+        self.safety.setAccessibleName("Doctor NoX only examines: it needs no root, makes no network requests, "
+                                      "uploads nothing and changes nothing on your system")
         self.statusBar().addPermanentWidget(self.safety)
         self.statusBar().setSizeGripEnabled(False)
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage(clinic.MOTTO)
 
     # theme -------------------------------------------------------------------
     def set_theme_mode(self, mode: str):
@@ -678,7 +775,7 @@ class Window(QMainWindow):
                            (QKeySequence(Qt.Key.Key_F5), self.start_scan),
                            (QKeySequence("Ctrl+R"), self.start_scan),
                            (QKeySequence(Qt.Key.Key_Escape), self._escape),
-                           (QKeySequence("Ctrl+Shift+C"), self.copy_summary),
+                           (QKeySequence("Ctrl+Shift+C"), self.copy_note),
                            (QKeySequence.StandardKey.Save, lambda: self.export(True, "text")),
                            (QKeySequence.StandardKey.HelpContents, self.show_about),
                            (QKeySequence.StandardKey.Quit, self.close)):
@@ -714,7 +811,7 @@ class Window(QMainWindow):
         self.cancel_btn.setVisible(True)
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
-        self.statusBar().showMessage("Scanning… read-only checks are running.")
+        self.statusBar().showMessage("Examining… every test only looks; nothing is changed.")
         self.worker.start()
         self.render_all()
 
@@ -722,7 +819,7 @@ class Window(QMainWindow):
         if self.scanning() and self.worker is not None:
             self.worker.cancel()
             self.cancel_btn.setEnabled(False)
-            self.statusBar().showMessage("Cancelling… stopping running checks.")
+            self.statusBar().showMessage("Stopping the checkup… ending the tests that are running.")
 
     def _escape(self):
         if self.scanning():
@@ -744,7 +841,7 @@ class Window(QMainWindow):
             return
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(done)
-        self.statusBar().showMessage(f"Scanning {done}/{total} · {title}")
+        self.statusBar().showMessage(f"Examining {done} of {total}: {title}")
 
     @Slot(object, int)
     def _completed(self, result, generation):
@@ -752,11 +849,15 @@ class Window(QMainWindow):
             return
         if generation != self.generation:
             return  # a stale scan never overwrites a newer one
+        # A checkup that was stopped early has unfinished tests; comparing it would call them changes.
+        self.follow = clinic.follow_up(result, self.remembered) if result["complete"] else None
         self.report = result
-        when = datetime.datetime.now().strftime("%H:%M:%S")
+        if record.save(self.record_path, result):
+            self.remembered = record.snapshot(result)
+        when = datetime.datetime.now().strftime("%H:%M")
         self.statusBar().showMessage(
-            f"Scan finished at {when} in {result['duration_ms']} ms"
-            + ("" if result["complete"] else " · incomplete: cancelled or timed out"))
+            f"Checkup finished at {when}, took {vm.duration_text(result['duration_ms'])}"
+            + ("" if result["complete"] else " · stopped early: cancelled or out of time"))
         self.render_all()
 
     @Slot(str, int)
@@ -765,7 +866,7 @@ class Window(QMainWindow):
             return
         if generation == self.generation:
             self.last_error = message[:500]
-            self.statusBar().showMessage(f"Scan failed: {message[:200]}")
+            self.statusBar().showMessage(f"The checkup couldn't finish: {message[:200]}")
 
     @Slot(int)
     def _scan_thread_done(self, generation):
@@ -795,7 +896,7 @@ class Window(QMainWindow):
             # Never destroy a running QThread: cancel, then close once it has finished.
             self.close_requested = True
             self.cancel_scan()
-            self.statusBar().showMessage("Closing after the running checks stop…")
+            self.statusBar().showMessage("Closing after the running tests stop…")
             event.ignore()
             return
         event.accept()
@@ -821,26 +922,32 @@ class Window(QMainWindow):
 
     def render_all(self):
         host, counts = vm.header_text(self.report)
-        self.subtitle.setText(host or "Read-only system health diagnostics")
+        self.subtitle.setText(host or SUBTITLE)
         if self.report:
             state = self.report["overall"]
             complete = self.report["complete"]
-            self._set_verdict(themes.HEADLINE[state] + ("" if complete else " (incomplete)"), state,
-                              f"Overall state {STATUS_TEXT[state]}. {counts}")
+            self._set_verdict(themes.HEADLINE[state] + ("" if complete else " (stopped early)"), state,
+                              f"{themes.HEADLINE[state]}: {counts}")
             stamp = datetime.datetime.fromisoformat(self.report["generated_at"]).astimezone()
-            self.snapshot.setText(f"Last scan {stamp:%Y-%m-%d %H:%M}, took {vm.duration_text(self.report['duration_ms'])}")
+            self.snapshot.setText(f"Last checkup {stamp:%Y-%m-%d %H:%M}, "
+                                  f"took {vm.duration_text(self.report['duration_ms'])}")
             totals = self.report["totals"]
             for sev, button in self.sev_buttons.items():
                 button.setText(f"{STATUS_TEXT[sev]}  {totals[sev]}")
         else:
-            self._set_verdict("Scanning…" if self.scanning() else "Not scanned yet", None, "No results yet")
+            self._set_verdict("Examining…" if self.scanning() else "No checkup yet", None, "No findings yet")
             self.snapshot.setText("")
             for sev, button in self.sev_buttons.items():
                 button.setText(STATUS_TEXT[sev])
         self.snapshot.setVisible(self.report is not None)
-        self.scan_btn.setText("Scan again" if self.report else "Scan")
+        self.scan_btn.setText("New checkup" if self.report else "Start checkup")
         self.copy_btn.setEnabled(self.report is not None)
         self.export_btn.setEnabled(self.report is not None)
+        self.symptom_btn.setText(f"What's wrong?  {clinic.SYMPTOM[self.symptom].label}")
+        for key, action in self.symptom_actions.items():
+            action.setChecked(key == self.symptom)
+        for vital in clinic.vitals(self.report):
+            self.vital_tiles[vital["key"]].show_vital(vital, self.theme)
         self.render_nav()
         self.render_list()
 
@@ -865,13 +972,16 @@ class Window(QMainWindow):
     def render_list(self):
         query = self.search.text()
         sevs = frozenset(self.severities)
-        items = vm.visible(self.report, self.category, query, sevs)
+        items = vm.visible(self.report, self.category, query, sevs, self.symptom)
+        changes = self.follow["changes"] if self.follow else {}
         self.tree.blockSignals(True)
         self.tree.clear()
         keep = None
         for f in items:
             sev = f["severity"]
-            row = QTreeWidgetItem([STATUS_TEXT[sev], CATEGORY_TITLE[f["category"]], f["title"], f["summary"]])
+            change = clinic.CHANGE_TEXT[changes[f["id"]][0]] if f["id"] in changes else ""
+            row = QTreeWidgetItem([STATUS_TEXT[sev], CATEGORY_TITLE[f["category"]], f["title"], f["summary"],
+                                   change])
             row.setData(0, Qt.ItemDataRole.UserRole, f["id"])
             row.setData(0, SEV_ROLE, sev)
             row.setToolTip(2, f["title"])
@@ -881,8 +991,10 @@ class Window(QMainWindow):
             if f["id"] == self.selected_id:
                 keep = row
         self.tree.setColumnHidden(1, self.category != vm.OVERVIEW)
+        # Shown only when something did change since the last checkup.
+        self.tree.setColumnHidden(CHANGE_COLUMN, not any(clinic.CHANGE_TEXT[kind] for kind, _ in changes.values()))
         self.tree.blockSignals(False)
-        message = vm.empty_state(self.report, self.scanning(), self.category, query, sevs)
+        message = vm.empty_state(self.report, self.scanning(), self.category, query, sevs, self.symptom)
         self.empty.setText(message)
         self.empty_mark.setVisible(self.report is None)
         self.stack.setCurrentWidget(self.empty_box if message else self.tree)
@@ -893,11 +1005,44 @@ class Window(QMainWindow):
             if self.last_error:
                 self.details.setHtml(vm.error_html(self.last_error, self.theme))
             else:
-                self.details.setHtml(vm.overview_html(self.report, self.scanning(), self.theme))
+                self.details.setHtml(vm.overview_html(self.report, self.scanning(), self.theme, self.follow,
+                                                      self.symptom))
 
     def _toggle_severity(self, sev, on):
         (self.severities.add if on else self.severities.discard)(sev)
         self.render_list()
+
+    def set_symptom(self, key: str):
+        """What's wrong? Shows the tests that bear on it, and the verdict speaks to it."""
+        self.symptom = key if key in clinic.SYMPTOM else clinic.GENERAL
+        if self.symptom == clinic.GENERAL:
+            self.statusBar().showMessage("Showing the whole checkup.")
+        else:
+            self.statusBar().showMessage(f"Showing the tests for “{clinic.SYMPTOM[self.symptom].label}”. "
+                                         "Choose Just a checkup to see them all.")
+        self.selected_id = ""  # back to the diagnosis, which now speaks to the complaint
+        self.render_all()
+        if self.report is None and self.interactive and not self.scanning():
+            self.start_scan()
+
+    def open_finding(self, finding_id: str):
+        """Show one test whatever is filtered out (a vital sign was clicked)."""
+        if not self.report or not any(f["id"] == finding_id for f in self.report["findings"]):
+            return
+        self.search.blockSignals(True)
+        self.search.clear()
+        self.search.blockSignals(False)
+        for button in self.sev_buttons.values():
+            button.blockSignals(True)
+            button.setChecked(True)
+            button.blockSignals(False)
+        self.severities = set(SEVERITIES)
+        self.category = vm.OVERVIEW
+        self.symptom = clinic.GENERAL
+        self.selected_id = finding_id
+        self.render_all()
+        if self.tree.currentItem() is not None:
+            self.tree.scrollToItem(self.tree.currentItem())
 
     def _category_changed(self, current, _previous):
         if current is not None:
@@ -913,20 +1058,26 @@ class Window(QMainWindow):
         finding = next((f for f in (self.report or {}).get("findings", []) if f["id"] == fid), None)
         if finding:
             self.selected_id = fid
-            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono))
+            change = self.follow["changes"].get(fid) if self.follow else None
+            self.details.setHtml(vm.detail_html(finding, self.theme, self.mono, change))
 
     # output ------------------------------------------------------------------
     def _identity(self):
         user, host = self.identity
         return user or os.environ.get("USER", ""), host
 
-    def copy_summary(self):
+    def note_text(self) -> str:
+        """The doctor's note for the checkup on screen, redacted for sharing."""
+        if not self.report:
+            return ""
+        user, host = self._identity()
+        return clinic.note(reports.redact_report(self.report, user, host), self.follow)
+
+    def copy_note(self):
         if not self.report:
             return
-        user, host = self._identity()
-        shared = reports.redact_report(self.report, user, host)
-        QApplication.clipboard().setText(reports.format_summary(shared))
-        self.statusBar().showMessage("Redacted summary copied to the clipboard.")
+        QApplication.clipboard().setText(self.note_text())
+        self.statusBar().showMessage("Doctor's note copied. It is redacted for sharing; read it before you post it.")
 
     def export(self, redacted, fmt):
         snapshot = self.report  # the dialog runs a nested event loop; a finishing scan must not swap reports
@@ -976,12 +1127,15 @@ class Window(QMainWindow):
                      "org.freedesktop.Flatpak permission, not inside the sandbox.</p>"
                      if flatpak.sandbox_app_path() else "")
         text = (f"<h3 style='margin-bottom:4px'>Doctor NoX {VERSION}</h3>"
+                f"<p style='margin-top:0;margin-bottom:4px'><i>{clinic.MOTTO}</i></p>"
                 f"<p style='color:{t.muted};margin-top:0'>NoX is Latin for night, and the name is a play on "
                 f"&ldquo;Doctor Noooo&rdquo;.</p>"
-                f"<p>Read-only system health checks for Linux: Fedora (including Atomic and bootc), "
-                f"Debian and Ubuntu, Arch and openSUSE, with general checks everywhere else.</p>"
-                f"<p>No root, no repairs, no network requests and no telemetry. "
-                f"Reports are written only where you choose.</p>{sandboxed}"
+                f"<p>A doctor for your Linux PC. It examines, diagnoses and prescribes, and never operates: "
+                f"every treatment is yours to carry out. For Fedora (including Atomic and bootc), Debian and "
+                f"Ubuntu, Arch and openSUSE, with general tests everywhere else.</p>"
+                f"<p>No root, no repairs, no network requests and no telemetry. Reports are written only where "
+                f"you choose. To follow up, it keeps one small file of its own: the conditions found at your "
+                f"last checkup.</p>{sandboxed}"
                 f"<p style='color:{t.muted}'>Report schema v{SCHEMA_VERSION}, {qt}, "
                 f"Python {sys.version.split()[0]}<br>License: Apache-2.0</p>")
         QMessageBox.about(self, "About Doctor NoX", text)
@@ -1001,7 +1155,7 @@ def _application():
 def run() -> int:
     import signal
     app = _application()
-    window = Window()
+    window = Window(record_path=record.default_path())
     app.aboutToQuit.connect(window.shutdown)
     # Ctrl+C in the launching terminal: close like the user would (deferred while scanning).
     signal.signal(signal.SIGINT, lambda *_: window.close())
@@ -1055,7 +1209,13 @@ def _demo_report():
           evidence=["system: example-sync.service  — Example sync daemon"],
           guidance=["Inspect: `systemctl status example-sync.service` and "
                     "`journalctl -b -u example-sync.service`."]),
+        F("hardware.cpu_memory", "hardware", "CPU & memory", "pass", "16 threads · 31.3 GiB RAM (22.4 GiB available)",
+          evidence=["CPU: AMD Ryzen 7 5800X 8-Core Processor · 16 threads",
+                    "memory: 31.3 GiB total, 22.4 GiB available now"]),
         F("hardware.graphics", "hardware", "Graphics", "pass", "AMD: amdgpu driver"),
+        F("hardware.sensors", "hardware", "Temperatures", "pass",
+          "Hottest sensor 47 °C; none at a reported critical limit",
+          evidence=["k10temp/temp1: 47 °C (crit 95 °C)", "amdgpu/temp1: 41 °C (crit 100 °C)"]),
         F("hardware.controllers", "hardware", "Game controllers", "warn",
           "Xbox-protocol controller connected but not bound to a driver"),
         F("storage.space", "storage", "Free space", "error", "Low free space: /boot",
@@ -1076,6 +1236,14 @@ def _demo_report():
                {"id": "software.snap", "category": "software", "title": "Snap", "applies_to": "systems with Snap"}]
     return build_report(findings, host, started=finished - datetime.timedelta(milliseconds=1840),
                         finished=finished, complete=True, not_applicable=skipped)
+
+
+def _demo_previous(report):
+    """A made-up earlier checkup for the screenshots: free space was better then, the controller worse."""
+    earlier = datetime.datetime.fromisoformat(report["generated_at"]) - datetime.timedelta(days=4)
+    conditions = {f["id"]: f["severity"] for f in report["findings"]}
+    conditions.update({"storage.space": "warn", "hardware.controllers": "error"})
+    return {"version": record.VERSION, "generated_at": earlier.isoformat(timespec="seconds"), "findings": conditions}
 
 
 def screenshots(out_dir: str) -> int:
@@ -1102,6 +1270,7 @@ def screenshots(out_dir: str) -> int:
                                            ("details", QSize(1280, 800), demo, True),
                                            ("narrow", QSize(980, 760), demo, True)):
             window.report = report
+            window.follow = clinic.follow_up(report, _demo_previous(report)) if report else None
             window.category = vm.OVERVIEW
             window.selected_id = ""
             window.resize(size)
@@ -1194,6 +1363,8 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
                         "The package database could not be read", guidance=["fixture guidance"]),
                 Finding("hardware.controllers", "hardware", "Game controllers", "warn",
                         "Xbox-protocol controller connected", evidence=["user alice on 10.1.2.3"]),
+                Finding("hardware.sensors", "hardware", "Temperatures", "pass",
+                        "Hottest sensor 47 °C; none at a reported critical limit"),
                 Finding("network.link", "network", "Network links", "info", "Offline")]
 
     def slow_probe(ctx):
@@ -1225,10 +1396,24 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
         app.processEvents()
         return until()
 
-    window = Window(scan_func=scan, context_factory=fixture_context, autoscan=False, interactive=False)
+    # Follow-ups are tried against a remembered checkup in a temporary directory, never the user's own.
+    import json
+    records = tempfile.TemporaryDirectory(prefix="doctor-nox-selftest-record-")
+    record_path = Path(records.name) / "state" / record.FILE_NAME
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(json.dumps({
+        "version": record.VERSION, "generated_at": "2026-01-01T00:00:00+00:00",
+        "findings": {"updates.packages": "pass", "hardware.controllers": "error", "network.link": "info"}}))
+
+    window = Window(scan_func=scan, context_factory=fixture_context, autoscan=False, interactive=False,
+                    record_path=record_path)
     window.show()
     app.processEvents()
     log("window shown")
+    check(window.scan_btn.text() == "Start checkup" and window.verdict.text() == "No checkup yet",
+          "before a checkup the window says so")
+    check(all(tile.reading == clinic.NO_VALUE for tile in window.vital_tiles.values()),
+          "vital signs are blank before a checkup")
 
     # 1. scanning
     gate.set()
@@ -1236,11 +1421,52 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     log("scan 1 started")
     check(pump(lambda: window.report is not None and not window.scanning()), "scan 1 completes")
     check(window.workers == {} and window.worker is None, "scan 1 thread joined and released")
-    check(window.tree.topLevelItemCount() == 5, "overview lists all 5 findings")
+    check(window.tree.topLevelItemCount() == 6, "the diagnosis lists all 6 findings")
     check(window.tree.topLevelItemCount() > 0 and window.tree.topLevelItem(0).data(0, SEV_ROLE) == "error",
           "most severe finding sorts first")
     check(bool(probe_threads) and all(n.startswith("doctor-probe") for n in probe_threads),
           "probes ran on engine worker threads")
+
+    # 1b. the doctor: wording, verdict, vital signs, what's wrong, follow-ups
+    check(window.scan_btn.text() == "New checkup" and window.verdict.text() == "Needs treatment",
+          "after a checkup the headline and the button are in the doctor's words")
+    said = window.details.toPlainText()
+    check("Your PC needs treatment." in said and "Package database" in said, "the diagnosis opens with the verdict")
+    check(window.vital_tiles["temperature"].reading == "47 °C" and window.vital_tiles["memory"].reading == "Not examined",
+          "vital signs show a reading, or that nothing measured them")
+    check("Worse since your last checkup" in said and "Better" in said, "the diagnosis says what changed")
+    check(not window.tree.isColumnHidden(CHANGE_COLUMN)
+          and window.tree.topLevelItem(0).text(CHANGE_COLUMN) == "Worse", "the findings mark what got worse")
+    saved = record.load(record_path)
+    check(saved is not None and saved["generated_at"] == window.report["generated_at"]
+          and oct(record_path.stat().st_mode & 0o777) == "0o600", "the finished checkup is remembered, privately")
+    window.vital_tiles["temperature"].clicked.emit("hardware.sensors")
+    app.processEvents()
+    check("Temperatures" in window.details.toPlainText() and "None needed." in window.details.toPlainText(),
+          "a vital sign opens its test")
+    window.set_symptom("network")
+    app.processEvents()
+    check(window.tree.topLevelItemCount() == 1 and "No internet" in window.details.toPlainText()
+          and "No internet" in window.symptom_btn.text(), "what's wrong narrows the findings and the verdict")
+    window.set_symptom(clinic.GENERAL)
+    app.processEvents()
+    check(window.tree.topLevelItemCount() == 6, "just a checkup shows every finding again")
+    note = window.note_text()
+    check("doctor's note" in note and "NEEDS TREATMENT" in note and "alice" not in note and "10.1.2.3" not in note,
+          "the doctor's note is in the doctor's words and redacted")
+    remembered_at = record_path.stat().st_mtime_ns
+    window.resize(1240, 780)
+    app.processEvents()
+    inside = window.rect()
+    parts = [window.symptom_btn, window.scan_btn, window.copy_btn, window.export_btn, window.more_btn,
+             window.search, *window.sev_buttons.values(), *window.vital_tiles.values()]
+    outside = [w.accessibleName() or w.text() for w in parts if not w.isVisible() or not inside.contains(
+        QRect(w.mapTo(window, w.rect().topLeft()), w.size()))]
+    needs = window.minimumSizeHint().width()
+    check(window.width() == 1240 and not outside,
+          f"every control fits in the default 1240 px window (window {window.width()} px, outside: {outside})")
+    check(needs < NARROW, f"the window can be narrow enough for the stacked layout (needs {needs} px)")
+    log("doctor behaviour done")
 
     # 2. filtering and selection
     window.search.setText("controller")
@@ -1310,10 +1536,13 @@ def _self_test_steps(app, log, Finding, Probe, threading, time) -> int:
     check(pump(lambda: not [t for t in threading.enumerate() if t.name.startswith("doctor-probe")], 5),
           "engine probe threads exited")
     check(window.report is not None and window.report["complete"] is False, "cancelled scan reported INCOMPLETE")
+    check(window.follow is None and record_path.stat().st_mtime_ns == remembered_at,
+          "a checkup that was stopped early is neither compared nor remembered")
     check(window.thread_violations == [], f"UI updates ran only on the GUI thread {window.thread_violations}")
     bad_css = [m for m in QT_MESSAGES if "stylesheet" in m.lower()]
     check(bad_css == [], f"every stylesheet parsed without Qt warnings {bad_css[:3]}")
     _teardown(app, window)
+    records.cleanup()
     log("teardown done")
 
     if failures:

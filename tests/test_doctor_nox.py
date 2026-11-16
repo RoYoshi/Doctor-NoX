@@ -21,7 +21,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from doctor_testlib import ROOT, Tree  # noqa: E402
 
-from doctor_nox import cli, engine, model, probes, report, runner, theme, viewmodel as vm  # noqa: E402
+from doctor_nox import cli, clinic, engine, model, probes, record, report, runner, theme, viewmodel as vm  # noqa: E402
 from doctor_nox.model import Finding  # noqa: E402
 from doctor_nox.probes import Probe  # noqa: E402
 
@@ -437,8 +437,10 @@ class ViewModelTests(unittest.TestCase):
                          "Bazzite 44 (FROM Fedora Kinoite), image-based (OSTree), kernel 6.17.4-300.fc44.x86_64")
         self.assertEqual(len(vm.visible(rep, query="enp5s0 connected")), 1)
         self.assertEqual(vm.visible(rep, "network", severities=frozenset({"error"})), [])
-        self.assertIn("No checks match", vm.empty_state(rep, False, "network", "", frozenset({"error"})))
-        self.assertIn("Press Scan", vm.empty_state(None, False, "overview", "", frozenset(model.SEVERITIES)))
+        self.assertIn("No tests match", vm.empty_state(rep, False, "network", "", frozenset({"error"})))
+        self.assertIn("Press Start checkup", vm.empty_state(None, False, "overview", "", frozenset(model.SEVERITIES)))
+        self.assertEqual([f["id"] for f in vm.visible(rep, query="is:treat")], ["updates.packages"])
+        self.assertEqual({f["severity"] for f in vm.visible(rep, query="is:healthy")}, {"pass"})
 
     def test_detail_html_escapes_and_explains(self):
         f = Finding("logs.boot", "logs", "Boot <b>", "unknown", "x <script>alert(1)</script>",
@@ -446,12 +448,15 @@ class ViewModelTests(unittest.TestCase):
         html = vm.detail_html(f)
         self.assertNotIn("<script>", html)
         self.assertNotIn("<img", html)
-        self.assertIn("never runs these steps", html)
-        self.assertIn("Unknown", html)  # status is always spelled out, not colour alone
+        self.assertIn("never carries out these steps", html)
+        self.assertIn("Couldn't examine", html)  # the condition is always spelled out, not colour alone
+        for heading in ("Diagnosis", "What I found", "Treatment", "Test ID"):
+            self.assertIn(heading, html)
         self.assertIn("not a score", vm.overview_html(fixture_report()))
         self.assertIn("only on systems with Snap", vm.overview_html(fixture_report(skipped=True)))
         self.assertNotIn("NOT APPLICABLE HERE", vm.overview_html(fixture_report()))
         self.assertIn("any Linux", vm.overview_html(None))
+        self.assertIn(clinic.MOTTO, vm.overview_html(None))
 
     def test_sidebar_badges_count_problems_and_mark_healthy_groups(self):
         zero = {sev: 0 for sev in model.SEVERITIES}
@@ -460,15 +465,16 @@ class ViewModelTests(unittest.TestCase):
         self.assertEqual(vm.category_badge(dict(zero, warn=1, unknown=2), 3), ("3", "warn"))
         self.assertEqual(vm.category_badge(dict(zero, unknown=1, info=1), 2), ("1", "unknown"))
         self.assertEqual(vm.category_badge(dict(zero, info=2, **{"pass": 3}), 5), ("OK", "pass"))
-        self.assertEqual(vm.category_accessible("Logs", dict(zero, warn=2), 4), "Logs: 4 checks, 2 warnings")
-        self.assertEqual(vm.category_accessible("Logs", dict(zero, **{"pass": 4}), 4), "Logs: 4 checks, all verified")
-        self.assertEqual(vm.category_accessible("Logs", dict(zero, error=1), 4), "Logs: 4 checks, 1 error")
+        self.assertEqual(vm.category_accessible("Logs", dict(zero, warn=2), 4), "Logs: 4 tests, 2 to keep an eye on")
+        self.assertEqual(vm.category_accessible("Logs", dict(zero, **{"pass": 4}), 4), "Logs: 4 tests, all fine")
+        self.assertEqual(vm.category_accessible("Logs", dict(zero, error=1), 1), "Logs: 1 test, 1 needs treatment")
 
     def test_counts_and_durations_read_naturally(self):
         totals = {"error": 1, "warn": 2, "unknown": 1, "info": 4, "pass": 6}
-        self.assertEqual(vm.count_summary(totals), "1 error, 2 warnings, 1 unknown, 4 info and 6 passed")
-        self.assertEqual(theme.status_count("warn", 1), "1 warning")
-        self.assertEqual(theme.status_count("pass", 1), "1 passed")
+        self.assertEqual(vm.count_summary(totals),
+                         "1 needs treatment, 2 to keep an eye on, 1 couldn't be examined, 4 notes and 6 healthy")
+        self.assertEqual(theme.status_count("error", 2), "2 need treatment")
+        self.assertEqual(theme.status_count("info", 1), "1 note")
         self.assertEqual([vm.duration_text(ms) for ms in (420, 1840, 12345, -5)], ["0.4 s", "1.8 s", "12 s", "0.0 s"])
 
     def test_html_uses_the_requested_theme_and_never_neon(self):
@@ -481,9 +487,195 @@ class ViewModelTests(unittest.TestCase):
                 self.assertIn(t.text, html)
                 for neon in ("#00ff00", "#ff00ff", "#000000"):
                     self.assertNotIn(neon, html.lower())
-        self.assertIn("Scan incomplete", vm.overview_html(fixture_report(complete=False)))
+        self.assertIn("Checkup stopped early", vm.overview_html(fixture_report(complete=False)))
         self.assertNotIn("<script>", vm.error_html("boom <script>"))
         self.assertIn("font-family:'Hack'", vm.detail_html(finding, theme.DARK_THEME, "Hack"))
+
+
+# ── the doctor: verdict, what's wrong, follow-ups, the note ─────────────────
+def checkup(*findings, complete=True, at=(2026, 11, 16, 18, 0)):
+    """A report of (id, severity[, guidance]) findings; titles are the IDs' last word, capitalised."""
+    import datetime
+    when = datetime.datetime(*at, tzinfo=datetime.timezone.utc)
+    items = [Finding(i, i.split(".")[0], i.split(".")[-1].replace("_", " ").capitalize(), sev, f"{i} summary",
+                     guidance=list(extra[:1])) for i, sev, *extra in findings]
+    return model.build_report(items, {"name": "Test Linux", "kernel": "6.1"}, started=when, finished=when,
+                              complete=complete)
+
+
+class ClinicTests(unittest.TestCase):
+    def test_the_verdict_says_the_most_important_thing_first(self):
+        well = clinic.verdict(checkup(("storage.space", "pass"), ("hardware.audio", "info")))
+        self.assertEqual(well, ["Your PC is in good health. I ran 2 tests and nothing needs treatment."])
+
+        ill = clinic.verdict(checkup(("storage.space", "error", "free some"), ("security.failed_units", "warn"),
+                                     ("hardware.audio", "pass"), ("logs.boot", "unknown")))
+        self.assertEqual(ill[0], "Your PC needs treatment.")
+        self.assertEqual(ill[1], "1 thing needs treatment: Space.")
+        self.assertIn("Keep an eye on Failed units.", ill)
+        self.assertIn("Start with Space; select it for the treatment.", ill)
+        self.assertTrue(any(line.startswith("I couldn't examine Boot.") and "clean bill of health" in line
+                            for line in ill))
+        self.assertEqual(ill[-1], "The other 1 test came back fine.")
+
+        watch = clinic.verdict(checkup(("hardware.sensors", "warn"), ("hardware.audio", "pass")))
+        self.assertEqual(watch[0], "Your PC is mostly well, but I would keep an eye on it.")
+        self.assertFalse(any(line.startswith("Start with") for line in watch), "one finding needs no order")
+        unseen = clinic.verdict(checkup(("logs.boot", "unknown")))
+        self.assertEqual(unseen[0], "I found nothing wrong, but I couldn't examine everything.")
+        self.assertIn("stopped early", clinic.verdict(checkup(("logs.boot", "unknown"), complete=False))[-1])
+        many = clinic.verdict(checkup(*[(f"storage.t{n}", "error") for n in range(5)]))
+        self.assertEqual(many[1], "5 things need treatment: T0, T1 and 3 more.")
+        self.assertEqual(clinic.verdict(checkup()), ["I had no tests to run on this system."])
+
+    def test_whats_wrong_examines_the_tests_for_the_complaint(self):
+        rep = checkup(("hardware.audio", "pass"), ("hardware.session", "pass"), ("storage.space", "error"),
+                      ("network.link", "warn"), ("network.dns", "pass"), ("system.image.pending", "info"))
+        self.assertEqual([s.key for s in clinic.SYMPTOMS][0], clinic.GENERAL)
+        self.assertEqual(len({s.label for s in clinic.SYMPTOMS}), len(clinic.SYMPTOMS))
+        shown = lambda symptom: [f["id"] for f in vm.visible(rep, symptom=symptom)]  # noqa: E731
+        self.assertEqual(len(shown(clinic.GENERAL)), 6)
+        self.assertEqual(shown("sound"), ["hardware.audio", "hardware.session"])
+        self.assertEqual(shown("network"), ["network.link", "network.dns"])
+        self.assertEqual(shown("updates"), ["storage.space", "system.image.pending", "network.dns"])
+        self.assertFalse(clinic.related("hardware.audio_extra", "sound"), "an ID is matched whole, not by its start")
+        self.assertTrue(clinic.related("anything.at_all", "no such complaint"), "an unknown complaint hides nothing")
+
+        sound = clinic.verdict(rep, "sound")
+        self.assertEqual(sound[0], "For “No sound” I looked at 2 tests. They all came back fine, so the cause is "
+                                   "somewhere I can't see from here.")
+        self.assertEqual(sound[1], "Elsewhere, 2 other findings need a look: Space and Link.")
+        net = clinic.verdict(rep, "network")
+        self.assertIn("Nothing is broken, but there is something to keep an eye on.", net[0])
+        self.assertIn("Keep an eye on Link.", net)
+        none = clinic.verdict(checkup(("storage.space", "pass")), "sound")
+        self.assertIn("no tests that apply to this system", none[0])
+        self.assertIn("in good health", none[1])
+        self.assertIn("No tests for “No sound” in this area",
+                      vm.empty_state(rep, False, "storage", "", frozenset(model.SEVERITIES), "sound"))
+        self.assertIn("No sound", vm.overview_html(rep, symptom="sound"))
+
+    def test_follow_up_says_what_changed_and_never_calls_unseen_better(self):
+        import datetime
+        now = datetime.datetime(2026, 11, 16, 20, 0, tzinfo=datetime.timezone.utc)
+        before = checkup(("storage.space", "pass"), ("hardware.audio", "warn"), ("logs.boot", "warn"),
+                         ("network.link", "unknown"), ("network.dns", "unknown"), ("updates.reboot", "info"),
+                         at=(2026, 11, 12, 9, 0))
+        after = checkup(("storage.space", "error"), ("hardware.audio", "pass"), ("logs.boot", "unknown"),
+                        ("network.link", "warn"), ("network.dns", "pass"), ("updates.reboot", "pass"),
+                        ("hardware.sensors", "error"))
+        follow = clinic.follow_up(after, record.snapshot(before))
+        self.assertEqual(follow["changes"], {"storage.space": ("worse", "pass"), "hardware.audio": ("better", "warn"),
+                                             "logs.boot": ("unseen", "warn"), "network.link": ("worse", "unknown")})
+        text = clinic.follow_up_text(after, follow, now)
+        self.assertEqual(text[0], "Worse since your last checkup 4 days ago (12 Nov): Space (was Healthy, now Needs "
+                                  "treatment); Link (was Couldn't examine, now Keep an eye on it).")
+        self.assertEqual(text[1], "Better: Audio (was Keep an eye on it, now Healthy).")
+        self.assertEqual(text[2], "I couldn't examine Boot this time.")
+        self.assertEqual(clinic.follow_up_text(before, clinic.follow_up(before, record.snapshot(
+            checkup(("storage.space", "pass"), at=(2026, 11, 15, 9, 0)))), now),
+            ["Nothing has changed since your last checkup yesterday."])
+        self.assertIsNone(clinic.follow_up(after, None))
+        self.assertIsNone(clinic.follow_up(after, record.snapshot(after)), "a checkup is not compared with itself")
+        self.assertEqual(clinic.follow_up_text(after, None), [])
+        self.assertEqual(clinic.when_text("2026-11-16T01:00:00+00:00", now), "earlier today")
+        self.assertEqual(clinic.when_text("2025-12-30T12:00:00+00:00", now), "321 days ago (30 Dec 2025)")
+        self.assertEqual(clinic.when_text("not a time", now), "")
+
+        html = vm.overview_html(after, follow=follow, now=now)
+        self.assertIn("Since your last checkup", html)
+        self.assertIn("Worse since your last checkup 4 days ago", html)
+        self.assertNotIn("Since your last checkup", vm.overview_html(after))
+        detail = vm.detail_html(after["findings"][0], change=follow["changes"]["storage.space"])
+        self.assertIn("Worse since your last checkup: it was Healthy.", detail)
+        self.assertNotIn("since your last checkup", vm.detail_html(after["findings"][2],
+                                                                   change=follow["changes"]["logs.boot"]))
+
+    def test_vital_signs_before_and_after_a_checkup(self):
+        blank = clinic.vitals(None)
+        self.assertEqual([v["label"] for v in blank], ["Temperature", "Memory", "Disk space", "Restart"])
+        self.assertTrue(all(v["value"] == clinic.NO_VALUE and v["severity"] is None for v in blank))
+        signs = {v["key"]: v for v in clinic.vitals(checkup(("hardware.sensors", "unknown"),
+                                                             ("hardware.cpu_memory", "pass")))}
+        self.assertEqual(signs["temperature"]["value"], "Couldn't read")
+        self.assertEqual(signs["memory"]["value"], "hardware.cpu_memory summary", "an unknown wording is shown as it is")
+        self.assertEqual(signs["memory"]["finding_id"], "hardware.cpu_memory")
+        self.assertEqual((signs["disk"]["value"], signs["disk"]["severity"], signs["disk"]["finding_id"]),
+                         ("Not examined", None, ""))
+
+    def test_doctors_note_is_labelled_redacted_and_prescribes(self):
+        rep = fixture_report()
+        shared = report.redact_report(rep, "alice", "fe-royo")
+        note = clinic.note(shared)
+        for secret in SECRETS:
+            self.assertNotIn(secret, note)
+        self.assertIn("doctor's note", note.splitlines()[0])
+        self.assertIn("REDACTED SHARING REPORT", note)
+        self.assertIn("Patient:  Bazzite 44", note)
+        self.assertIn("Verdict:  Needs treatment (1 needs treatment, 1 to keep an eye on", note)
+        self.assertIn("NEEDS TREATMENT\n- Updates & Packages / Package database", note)
+        self.assertIn("KEEP AN EYE ON\n- Logs / Current boot errors", note)
+        self.assertNotIn("select it", note, "a note cannot be clicked")
+        self.assertIn("nothing on this PC was changed", note.splitlines()[-1])
+        self.assertIn("FULL LOCAL REPORT", clinic.note(rep))
+        self.assertIn("1 test for other kinds of Linux did not apply here and was not run.",
+                      clinic.note(fixture_report(skipped=True)))
+        full = clinic.note(checkup(("storage.space", "error", "free some room"), ("logs.boot", "info")))
+        self.assertIn("    Treatment: free some room", full)
+        self.assertIn("NOTES\n- Logs / Boot", full)
+
+    def test_conditions_are_worded_for_every_severity_and_json_keeps_its_own(self):
+        for words in (theme.STATUS_TEXT, theme.STATUS_COUNT, theme.STATUS_MEANING, theme.HEADLINE, clinic.CONCERN):
+            self.assertEqual(set(words), set(model.SEVERITIES))
+        self.assertEqual(theme.STATUS_TEXT["pass"], "Healthy")
+        self.assertEqual(json.loads(report.to_json(fixture_report()))["findings"][1]["severity"], "error")
+        self.assertIn("[ERROR  ]", report.format_text(fixture_report()), "--text keeps the report's severities")
+
+
+class RecordTests(unittest.TestCase):
+    def test_the_last_checkup_is_remembered_privately_and_only_when_finished(self):
+        rep = checkup(("storage.space", "error"), ("hardware.audio", "pass"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "doctor-nox" / record.FILE_NAME
+            self.assertIsNone(record.load(path))
+            self.assertTrue(record.save(path, rep))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual([p.name for p in path.parent.iterdir()], [record.FILE_NAME], "no temporary file is left")
+            kept = json.loads(path.read_text())
+            self.assertEqual(kept, {"version": 1, "generated_at": rep["generated_at"],
+                                    "findings": {"storage.space": "error", "hardware.audio": "pass"}})
+            self.assertEqual(record.load(path), kept)
+            self.assertFalse(record.save(path, checkup(("storage.space", "pass"), complete=False)))
+            self.assertFalse(record.save(path, report.redact_report(rep)))
+            self.assertFalse(record.save(None, rep))
+            self.assertEqual(record.load(path), kept, "an unfinished checkup never replaces a finished one")
+            self.assertFalse(record.save(Path(tmp) / "state" / "doctor-nox" / record.FILE_NAME / "x", rep),
+                             "a place that cannot be written is not an error")
+            for junk in ("", "not json", "[]", '{"version": 2, "generated_at": "x", "findings": {}}',
+                         '{"version": 1, "generated_at": 5, "findings": {}}', "x" * (record.MAX_BYTES + 1)):
+                path.write_text(junk)
+                self.assertIsNone(record.load(path), junk[:30])
+            path.write_text('{"version": 1, "generated_at": "t", "findings": {"a.b": "pass", "c.d": "bogus"}}')
+            self.assertEqual(record.load(path)["findings"], {"a.b": "pass"})
+
+    def test_where_it_is_kept(self):
+        self.assertEqual(record.default_path({"XDG_STATE_HOME": "/s", "HOME": "/h"}),
+                         Path("/s/doctor-nox/last-checkup.json"))
+        self.assertEqual(record.default_path({"XDG_STATE_HOME": "relative", "HOME": "/h"}),
+                         Path("/h/.local/state/doctor-nox/last-checkup.json"))
+
+    def test_only_the_window_a_person_opened_remembers(self):
+        """Reports, self-tests and screenshots must leave no file behind (image builds run them)."""
+        for module in ("cli.py", "engine.py", "report.py", "viewmodel.py", "clinic.py"):
+            self.assertNotRegex((PKG / module).read_text(), r"import.*\brecord\b|\brecord\.(save|load)", module)
+        tree = ast.parse((PKG / "gui.py").read_text())
+        funcs = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
+        self.assertIn("Window(record_path=record.default_path())", funcs["run"])
+        for name in ("smoke_test", "screenshots", "self_test", "_self_test_steps", "_demo_report"):
+            self.assertNotIn("default_path", funcs[name], name)
+        writers = [p.name for p in PKG.rglob("*.py") if "os.replace(" in p.read_text()]
+        self.assertEqual(sorted(writers), ["record.py", "report.py"], "only reports you save and the record are written")
 
 
 # ── theme (light/dark palettes) ─────────────────────────────────────────────
