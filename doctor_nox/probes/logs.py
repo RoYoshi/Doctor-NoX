@@ -14,8 +14,26 @@ CAT = "logs"
 PARTIAL_HINT = "not seeing messages from other users and the system"
 
 
+LONG_MESSAGE = "(a long message: `journalctl -b -p 3` shows it in full)"
+
+
+def _crash(entry):
+    """What crashed, from a systemd-coredump entry: its message is a whole backtrace, which
+    journalctl leaves out of JSON (as null), but the program and the signal are fields."""
+    name = entry.get("COREDUMP_COMM") or os.path.basename(str(entry.get("COREDUMP_EXE") or ""))
+    if not isinstance(name, str) or not name:
+        return ""
+    signal = entry.get("COREDUMP_SIGNAL_NAME") or entry.get("COREDUMP_SIGNAL")
+    return f"{name[:40]} crashed ({str(signal)[:12]})" if signal else f"{name[:40]} crashed"
+
+
 def _message(entry):
+    crash = _crash(entry)
+    if crash:
+        return crash
     msg = entry.get("MESSAGE", "")
+    if msg is None:  # journalctl prints null for a field too large to include
+        return LONG_MESSAGE
     if isinstance(msg, list):  # journald encodes non-UTF-8 messages as byte arrays
         try:
             msg = bytes(v for v in msg if isinstance(v, int) and 0 <= v < 256).decode("utf-8", "replace")
@@ -93,17 +111,25 @@ def boot(ctx):
     crit = [e for e in entries if e[0] <= 2]
     groups = Counter(ident for _, ident, _ in entries)
     last = OrderedDict()
+    crashes = Counter()
     for prio, ident, msg in entries:
         last[ident] = (prio, msg)
+        if ident == "systemd-coredump":
+            crashes[msg] += 1
     for ident, count in groups.most_common(10):
         prio, msg = last[ident]
+        if ident == "systemd-coredump" and crashes:
+            # Which programs crashed, and how often: the one thing worth knowing here.
+            msg = "; ".join(f"{what} ×{times}" if times > 1 else what for what, times in crashes.most_common(5))
         ev.append(f"{ident} ×{count} [{'crit' if prio <= 2 else 'err'}]: {msg}")
     if crit:
         return finding("logs.boot", CAT, "Current boot errors", WARN,
                        f"{len(crit)} critical and {len(entries) - len(crit)} error entries this boot",
-                       evidence=ev, guidance=["`journalctl -b -p 2` lists the critical entries.",
-                                              "Many desktops log harmless firmware/driver errors; judge "
-                                              "entries by whether something actually misbehaves."])
+                       evidence=ev, guidance=["`journalctl -b -p 2` lists the critical entries."]
+                       + (["`coredumpctl list --since=today` lists the crashes, and `coredumpctl info <PID>` "
+                           "shows one in detail."] if crashes else [])
+                       + ["Many desktops log harmless firmware/driver errors; judge "
+                          "entries by whether something actually misbehaves."])
     return finding("logs.boot", CAT, "Current boot errors", INFO,
                    f"{len(entries)} error-level entries this boot (no critical entries)", evidence=ev,
                    guidance=["Error-level messages are common and often harmless. "
